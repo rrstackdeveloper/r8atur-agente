@@ -17,15 +17,17 @@ log_level = logging.DEBUG if ENVIRONMENT == "development" else logging.INFO
 logging.basicConfig(level=log_level)
 logger = logging.getLogger("agentkit")
 
-proveedor = obtener_proveedor()
-PORT = int(os.getenv("PORT", 8000))
+# El proveedor se inicializa en lifespan para que Railway haya inyectado las vars
+proveedor = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global proveedor
+    proveedor = obtener_proveedor()
     await inicializar_db()
-    logger.info("Base de datos inicializada")
-    logger.info(f"Servidor AgentKit — Naylan (R8ATUR) en puerto {PORT}")
+    PORT = os.getenv("PORT", "8000")
+    logger.info(f"Servidor Naylan (R8ATUR) en puerto {PORT}")
     logger.info(f"Proveedor: {proveedor.__class__.__name__}")
     yield
 
@@ -44,7 +46,8 @@ async def health_check():
 
 @app.get("/webhook")
 async def webhook_verificacion(request: Request):
-    """Verificación GET del webhook (requerido por Meta, no-op para Twilio)."""
+    if proveedor is None:
+        return {"status": "starting"}
     resultado = await proveedor.validar_webhook(request)
     if resultado is not None:
         return PlainTextResponse(str(resultado))
@@ -53,10 +56,8 @@ async def webhook_verificacion(request: Request):
 
 @app.post("/webhook")
 async def webhook_handler(request: Request):
-    """
-    Recibe mensajes de WhatsApp via Twilio.
-    Genera respuesta con Claude (Naylan) y la envía de vuelta.
-    """
+    if proveedor is None:
+        raise HTTPException(status_code=503, detail="Servidor iniciando")
     try:
         mensajes = await proveedor.parsear_webhook(request)
 
@@ -66,14 +67,11 @@ async def webhook_handler(request: Request):
 
             logger.info(f"Mensaje de {msg.telefono}: {msg.texto}")
 
-            # Historial ANTES de guardar el mensaje actual (evita duplicados)
             historial = await obtener_historial(msg.telefono)
-
             respuesta = await generar_respuesta(msg.texto, historial)
 
             await guardar_mensaje(msg.telefono, "user", msg.texto)
             await guardar_mensaje(msg.telefono, "assistant", respuesta)
-
             await proveedor.enviar_mensaje(msg.telefono, respuesta)
 
             logger.info(f"Respuesta a {msg.telefono}: {respuesta[:100]}...")
