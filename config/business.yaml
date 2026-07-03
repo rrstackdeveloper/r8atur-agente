@@ -1,0 +1,41 @@
+# Configuración del negocio — Generado por AgentKit
+negocio:
+  nombre: "R8ATUR — R8A Agencia de Turismo y Negocios"
+  descripcion: >
+    Agencia de turismo y negocios formalmente registrada en Brasil (CNPJ 39.521.264/0001-26),
+    con sede en Salvador, Bahia. Atención 100% online para clientes en Latinoamérica y el Caribe.
+    Especializada en gestión de viajes de alto nivel para ejecutivos y empresas que no negocian la calidad.
+  sitio_web: "https://www.r8atur.com"
+  email: "r8a_agetur@r8atur.com"
+  telefono: "+55 75 99877-1684"
+  ubicacion: "Salvador, Bahia — Brasil"
+  cobertura: "Latinoamérica & Caribe"
+  horario: "24/7 — Disponible siempre"
+
+agente:
+  nombre: "Naylan"
+  tono: "Adaptativo — profesional, amigable, persuasivo o empático según el cliente"
+  casos_de_uso:
+    - "Responder preguntas frecuentes sobre servicios"
+    - "Cotizar y gestionar solicitudes de viaje"
+    - "Calificar y atender leads de ventas"
+    - "Agendar consultas con especialistas"
+    - "Soporte post-venta y seguimiento"
+
+servicios:
+  - nombre: "Pasajes Aéreos Nacionales"
+    descripcion: "Vuelos dentro de Brasil con tarifas preferenciales"
+  - nombre: "Pasajes Aéreos Internacionales"
+    descripcion: "Acceso a tarifas preferenciales en cientos de aerolíneas. Gestión de emisión, cambios y reemisiones"
+  - nombre: "Alojamiento Ejecutivo y de Lujo"
+    descripcion: "Red privada de hoteles ejecutivos y de lujo con tarifas negociadas exclusivas"
+  - nombre: "Cambio de Moneda Internacional"
+    descripcion: "Conversión de moneda internacional con tasas de mercado real, transparencia total y cero comisiones ocultas"
+  - nombre: "Seguros de Viaje 24/7"
+    descripcion: "Cobertura completa: asistencia médica internacional, cancelación de viaje y pérdida de equipaje"
+  - nombre: "Recargas Telefónicas Internacionales"
+    descripcion: "Recargas instantáneas para mantenerte conectado en cualquier parte del mundo"
+
+metadata:
+  creado: "2026-07-03"
+  version: "1.0"
