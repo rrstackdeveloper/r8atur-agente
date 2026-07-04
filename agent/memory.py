@@ -1,4 +1,4 @@
-# agent/memory.py — Memoria de conversaciones con SQLite
+# agent/memory.py — Memoria de conversaciones con SQLite/PostgreSQL
 import os
 from datetime import datetime
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
@@ -8,13 +8,29 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./agentkit.db")
+# El engine se crea en get_engine() para que no crashee al importar
+_engine = None
+_async_session = None
 
-if DATABASE_URL.startswith("postgresql://"):
-    DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+asyncpg://", 1)
 
-engine = create_async_engine(DATABASE_URL, echo=False)
-async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+def _get_database_url() -> str:
+    url = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./agentkit.db")
+    if url.startswith("postgresql://"):
+        url = url.replace("postgresql://", "postgresql+asyncpg://", 1)
+    return url
+
+
+def get_engine():
+    global _engine, _async_session
+    if _engine is None:
+        _engine = create_async_engine(_get_database_url(), echo=False)
+        _async_session = async_sessionmaker(_engine, class_=AsyncSession, expire_on_commit=False)
+    return _engine
+
+
+def get_session():
+    get_engine()
+    return _async_session
 
 
 class Base(DeclarativeBase):
@@ -33,13 +49,12 @@ class Mensaje(Base):
 
 async def inicializar_db():
     """Crea las tablas si no existen."""
-    async with engine.begin() as conn:
+    async with get_engine().begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
 
 async def guardar_mensaje(telefono: str, role: str, content: str):
-    """Guarda un mensaje en el historial de conversación."""
-    async with async_session() as session:
+    async with get_session()() as session:
         mensaje = Mensaje(
             telefono=telefono,
             role=role,
@@ -51,8 +66,7 @@ async def guardar_mensaje(telefono: str, role: str, content: str):
 
 
 async def obtener_historial(telefono: str, limite: int = 20) -> list[dict]:
-    """Recupera los últimos N mensajes de una conversación en orden cronológico."""
-    async with async_session() as session:
+    async with get_session()() as session:
         query = (
             select(Mensaje)
             .where(Mensaje.telefono == telefono)
@@ -69,8 +83,7 @@ async def obtener_historial(telefono: str, limite: int = 20) -> list[dict]:
 
 
 async def limpiar_historial(telefono: str):
-    """Borra todo el historial de una conversación."""
-    async with async_session() as session:
+    async with get_session()() as session:
         query = select(Mensaje).where(Mensaje.telefono == telefono)
         result = await session.execute(query)
         mensajes = result.scalars().all()
