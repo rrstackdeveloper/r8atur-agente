@@ -24,7 +24,7 @@ async def transcribir_audio(media_url: str, account_sid: str, auth_token: str) -
     """
     try:
         # Descargar audio — Twilio requiere autenticación básica
-        async with httpx.AsyncClient(timeout=30) as client:
+        async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
             r = await client.get(media_url, auth=(account_sid, auth_token))
             if r.status_code != 200:
                 logger.error(f"Error descargando audio: {r.status_code}")
