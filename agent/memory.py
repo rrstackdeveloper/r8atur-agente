@@ -14,9 +14,14 @@ _async_session = None
 
 
 def _get_database_url() -> str:
+    import logging as _logging
+    _log = _logging.getLogger("agentkit")
     url = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./agentkit.db")
+    _log.error(f"[DEBUG] DATABASE_URL raw: {repr(url)}")
+    _log.error(f"[DEBUG] All DB env vars: DATABASE_URL={repr(os.getenv('DATABASE_URL'))} DATABASE_PUBLIC_URL={repr(os.getenv('DATABASE_PUBLIC_URL'))}")
     if url.startswith("postgresql://"):
         url = url.replace("postgresql://", "postgresql+asyncpg://", 1)
+    _log.error(f"[DEBUG] Final DB URL: {repr(url)}")
     return url
 
 
