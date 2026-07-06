@@ -45,7 +45,7 @@ app = FastAPI(
 
 @app.get("/")
 async def health_check():
-    return {"status": "ok", "agente": "Naylan", "negocio": "R8ATUR"}
+    return {"status": "ok", "agente": "Naylan", "negocio": "R8ATUR", "admin_ok": bool(os.getenv("ADMIN_PASSWORD"))}
 
 
 @app.get("/webhook")
