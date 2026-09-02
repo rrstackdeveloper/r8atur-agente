@@ -1,0 +1,15 @@
+# config/agents.yaml — Destinos de notificación de handoff
+# NO hardcodear números en el código — editar este archivo para agregar/quitar agentes
+
+agents:
+  - id: yanara
+    nombre: Yanara Aguilar Vega
+    phone_e164: "+5511889532531"
+    rol: comercial
+    enabled: true
+  # Para agregar más agentes, descomenta y edita:
+  # - id: alejandro
+  #   nombre: Alejandro Rodriguez
+  #   phone_e164: "+5575..."
+  #   rol: ceo
+  #   enabled: false

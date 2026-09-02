@@ -1,5 +1,6 @@
 # agent/main.py — Servidor FastAPI + Webhook de WhatsApp para R8ATUR
 import os
+import yaml
 import logging
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, HTTPException, Header
@@ -12,6 +13,7 @@ from agent.memory import (
     inicializar_db, guardar_mensaje, obtener_historial,
     obtener_modo, establecer_modo, establecer_handoff,
     obtener_handoff_status, listar_conversaciones, obtener_historial_completo,
+    atomic_claim_conversation, marcar_notificacion_enviada, obtener_registro_completo,
 )
 from agent.providers import obtener_proveedor
 from agent.providers.base import ProveedorWhatsApp
@@ -44,11 +46,51 @@ app = FastAPI(
 )
 
 
+def _cargar_agentes_yaml() -> list[dict]:
+    """Lee config/agents.yaml y retorna lista de agentes habilitados."""
+    try:
+        with open("config/agents.yaml", "r", encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+        agentes = data.get("agents", [])
+        return [a for a in agentes if a.get("enabled", False)]
+    except FileNotFoundError:
+        return []
+
+
+def _mapear_prioridad(prioridad_raw: str) -> str:
+    """Mapea prioridad del JSON de escalado (alta/media/normal) → CRITICAL/HIGH/NORMAL."""
+    return {"alta": "CRITICAL", "media": "HIGH", "normal": "NORMAL"}.get(
+        str(prioridad_raw).lower(), "NORMAL"
+    )
+
+
 async def notificar_agentes(telefono: str, resumen: dict):
-    """Envía notificación de handoff a los números de agentes configurados."""
-    agent_phones_str = os.getenv("AGENT_PHONES", "").strip()
-    if not agent_phones_str:
-        logger.warning("AGENT_PHONES no configurado — handoff creado pero agentes no notificados")
+    """
+    Envía notificación de handoff a los agentes configurados.
+    Verifica notification_sent antes de enviar para evitar duplicados.
+    Lee de config/agents.yaml con fallback a AGENT_PHONES env var.
+    """
+    # Verificar si ya se notificó (deduplicación)
+    registro = await obtener_registro_completo(telefono)
+    if registro and registro.notification_sent:
+        logger.info(f"Notificación ya enviada para {telefono} — omitiendo duplicado")
+        return
+
+    # Obtener lista de teléfonos de agentes
+    phones_agentes: list[str] = []
+
+    # Primero intentar desde agents.yaml
+    agentes_yaml = _cargar_agentes_yaml()
+    if agentes_yaml:
+        phones_agentes = [a["phone_e164"] for a in agentes_yaml if a.get("phone_e164")]
+    else:
+        # Fallback a AGENT_PHONES env var
+        agent_phones_str = os.getenv("AGENT_PHONES", "").strip()
+        if agent_phones_str:
+            phones_agentes = [p.strip() for p in agent_phones_str.split(",") if p.strip()]
+
+    if not phones_agentes:
+        logger.warning("Sin agentes configurados — handoff creado pero agentes no notificados")
         return
 
     base_url = os.getenv("BASE_URL", "").rstrip("/")
@@ -57,7 +99,9 @@ async def notificar_agentes(telefono: str, resumen: dict):
     servicio = resumen.get("servicio", "No especificado")
     motivo = resumen.get("motivo", "No especificado")
     prioridad_raw = resumen.get("prioridad", "normal")
-    prioridad = {"alta": "🔴 Alta", "media": "🟡 Media", "normal": "🟢 Normal"}.get(prioridad_raw, prioridad_raw)
+    prioridad_display = {"alta": "🔴 Alta", "media": "🟡 Media", "normal": "🟢 Normal"}.get(
+        prioridad_raw, prioridad_raw
+    )
     resumen_texto = resumen.get("resumen", "Sin resumen")
 
     notif = (
@@ -65,16 +109,35 @@ async def notificar_agentes(telefono: str, resumen: dict):
         f"📱 WhatsApp: {telefono}\n"
         f"🛠 Servicio: {servicio}\n"
         f"📋 Motivo: {motivo}\n"
-        f"⚡ Prioridad: {prioridad}\n\n"
+        f"⚡ Prioridad: {prioridad_display}\n\n"
         f"📝 Resumen:\n{resumen_texto}\n\n"
         f"🔗 Abrir conversación:\n{link}"
     )
 
-    for agent_phone in agent_phones_str.split(","):
-        agent_phone = agent_phone.strip()
+    notificacion_exitosa = False
+    for agent_phone in phones_agentes:
         if agent_phone and proveedor:
-            ok = await proveedor.enviar_mensaje(agent_phone, notif)
-            logger.info(f"Notificación a agente {agent_phone}: {'ok' if ok else 'error'}")
+            try:
+                ok = await proveedor.enviar_mensaje(agent_phone, notif)
+                if ok:
+                    notificacion_exitosa = True
+                    logger.info(f"Notificación enviada a agente {agent_phone}: ok")
+                else:
+                    # Meta puede rechazar por requerir template aprobado
+                    logger.error(
+                        f"Error enviando notificación a {agent_phone} — "
+                        f"WHATSAPP_AGENT_NOTIFICATION_TEMPLATE_REQUIRED: "
+                        f"Meta puede requerir un template aprobado para mensajes iniciados por el negocio. "
+                        f"Ver: https://developers.facebook.com/docs/whatsapp/message-templates"
+                    )
+            except Exception as exc:
+                logger.error(
+                    f"Excepción enviando notificación a {agent_phone} — "
+                    f"WHATSAPP_AGENT_NOTIFICATION_TEMPLATE_REQUIRED: {exc}"
+                )
+
+    if notificacion_exitosa:
+        await marcar_notificacion_enviada(telefono)
 
 
 @app.get("/")
@@ -123,16 +186,25 @@ async def webhook_handler(request: Request):
             await proveedor.enviar_mensaje(msg.telefono, respuesta)
 
             if escalado is not None:
-                # Establecer estado WAITING_HUMAN y notificar agentes
-                resumen_str = str(escalado)
-                await establecer_handoff(
-                    msg.telefono,
-                    modo="bot",  # Naylan sigue respondiendo hasta que un agente tome
-                    handoff_status="WAITING_HUMAN",
-                    handoff_summary=resumen_str,
-                )
-                logger.info(f"Handoff creado para {msg.telefono}: {escalado}")
-                await notificar_agentes(msg.telefono, escalado)
+                # Verificar si ya existe un handoff activo (evitar duplicados)
+                status_actual = await obtener_handoff_status(msg.telefono)
+                if status_actual in ("WAITING_HUMAN", "HUMAN_ACTIVE"):
+                    logger.info(
+                        f"Handoff ya existe para {msg.telefono} (status={status_actual}) — omitiendo duplicado"
+                    )
+                else:
+                    prioridad_raw = escalado.get("prioridad", "normal")
+                    prioridad_db = _mapear_prioridad(prioridad_raw)
+                    resumen_str = str(escalado)
+                    await establecer_handoff(
+                        msg.telefono,
+                        modo="bot",  # Naylan sigue respondiendo hasta que un agente tome
+                        handoff_status="WAITING_HUMAN",
+                        handoff_summary=resumen_str,
+                        handoff_priority=prioridad_db,
+                    )
+                    logger.info(f"Handoff creado para {msg.telefono}: {escalado} | prioridad={prioridad_db}")
+                    await notificar_agentes(msg.telefono, escalado)
 
             logger.info(f"Respuesta a {msg.telefono}: {respuesta[:100]}...")
 
@@ -147,10 +219,15 @@ async def webhook_handler(request: Request):
 
 class MensajeAdmin(BaseModel):
     texto: str
+    agent_name: str | None = None  # Opcional: para futura diferenciación en historial
 
 
 class ModoPayload(BaseModel):
     modo: str
+
+
+class TomarPayload(BaseModel):
+    agent_name: str | None = None  # Si se omite, usa "Agente R8A" como default
 
 
 def _check_admin(x_admin_key: str | None) -> None:
@@ -158,6 +235,13 @@ def _check_admin(x_admin_key: str | None) -> None:
     if not password or x_admin_key != password:
         raise HTTPException(status_code=401, detail="No autorizado")
 
+
+# NOTA ARQUITECTURA: AGENT_IDENTITY_REQUIRED
+# El sistema tiene un único password de admin compartido. No hay cuentas individuales por agente.
+# Por eso no podemos verificar automáticamente qué agente específico está tomando la conversación.
+# El campo agent_name en TomarPayload permite que el frontend lo envíe si lo conoce;
+# si no se envía, se asigna "Agente R8A" como default.
+# Para implementar identidades individuales se requiere: sistema de autenticación por agente (JWT, sesiones).
 
 _ADMIN_HTML = """<!DOCTYPE html>
 <html lang="es">
@@ -172,7 +256,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 #login-box{background:white;padding:2rem;border-radius:12px;width:320px;box-shadow:0 4px 20px rgba(0,0,0,.2)}
 #login-box h2{color:#128C7E;margin-bottom:.5rem;text-align:center}
 #login-box p{text-align:center;color:#666;margin-bottom:1.5rem;font-size:.9rem}
-#login-box input{width:100%;padding:.75rem;border:1px solid #ddd;border-radius:8px;margin-bottom:1rem;font-size:1rem;outline:none}
+#login-box input{width:100%;padding:.75rem;border:1px solid #ddd;border-radius:8px;margin-bottom:.75rem;font-size:1rem;outline:none}
 #login-box input:focus{border-color:#128C7E}
 #login-box button{width:100%;padding:.75rem;background:#128C7E;color:white;border:none;border-radius:8px;font-size:1rem;cursor:pointer}
 #login-box button:hover{background:#0e7065}
@@ -182,31 +266,36 @@ header{background:#128C7E;color:white;padding:.75rem 1.5rem;display:flex;align-i
 header h1{font-size:1.1rem}
 #logout-btn{background:rgba(255,255,255,.2);border:none;color:white;padding:.4rem .9rem;border-radius:6px;cursor:pointer;font-size:.85rem}
 .content{display:flex;flex:1;overflow:hidden}
-#conv-list{width:300px;min-width:300px;background:white;border-right:1px solid #e2e8f0;overflow-y:auto}
-#conv-list h3{padding:1rem;font-size:.8rem;color:#666;text-transform:uppercase;letter-spacing:.05em;border-bottom:1px solid #e2e8f0}
+#conv-list{width:300px;min-width:300px;background:white;border-right:1px solid #e2e8f0;overflow-y:auto;display:flex;flex-direction:column}
+#conv-list h3{padding:.75rem 1rem;font-size:.75rem;color:#666;text-transform:uppercase;letter-spacing:.05em;border-bottom:1px solid #e2e8f0;flex-shrink:0}
+#conv-items{flex:1;overflow-y:auto}
 .conv-item{padding:.85rem 1rem;cursor:pointer;border-bottom:1px solid #f0f2f5;transition:background .15s}
 .conv-item:hover{background:#f7f8fa}
 .conv-item.active{background:#e6f3f2;border-left:3px solid #128C7E}
-.conv-phone{font-weight:600;font-size:.9rem;color:#1a202c}
-.conv-meta{display:flex;align-items:center;gap:.5rem;margin-top:.25rem}
-.conv-time{font-size:.72rem;color:#999}
-.badge{font-size:.65rem;padding:.15rem .5rem;border-radius:10px;font-weight:700;text-transform:uppercase}
+.conv-phone{font-weight:600;font-size:.88rem;color:#1a202c}
+.conv-meta{display:flex;align-items:center;gap:.4rem;margin-top:.3rem;flex-wrap:wrap}
+.conv-time{font-size:.7rem;color:#999}
+.badge{font-size:.65rem;padding:.2rem .55rem;border-radius:10px;font-weight:700;text-transform:uppercase;white-space:nowrap}
 .badge-BOT_ACTIVE{background:#c6f6d5;color:#276749}
 .badge-WAITING_HUMAN{background:#fef3c7;color:#92400e}
-.badge-HUMAN_ACTIVE{background:#fed7d7;color:#9b2c2c}
+.badge-WAITING_HUMAN.critical{background:#fed7d7;color:#9b2c2c;border:1px solid #fc8181}
+.badge-HUMAN_ACTIVE{background:#bee3f8;color:#2b6cb0}
 .badge-RESOLVED{background:#e2e8f0;color:#4a5568}
-#chat-panel{flex:1;display:flex;flex-direction:column;background:#e5ddd5}
-#chat-header{background:white;padding:.75rem 1.25rem;border-bottom:1px solid #e2e8f0;display:flex;align-items:center;justify-content:space-between}
-#chat-header-left{flex:1}
-#chat-phone{font-weight:600;color:#1a202c}
-#chat-count{font-size:.8rem;color:#999}
-#chat-actions{display:flex;gap:.5rem;align-items:center}
-#status-badge{font-size:.7rem;padding:.2rem .6rem;border-radius:10px;font-weight:700;text-transform:uppercase}
-.action-btn{padding:.45rem 1rem;border:none;border-radius:8px;cursor:pointer;font-size:.82rem;font-weight:600}
-#tomar-btn{background:#d69e2e;color:white;display:none}
+#chat-panel{flex:1;display:flex;flex-direction:column;background:#e5ddd5;min-width:0}
+#chat-header{background:white;padding:.75rem 1.25rem;border-bottom:1px solid #e2e8f0;display:flex;align-items:flex-start;justify-content:space-between;flex-wrap:wrap;gap:.5rem}
+#chat-header-left{flex:1;min-width:0}
+#chat-phone{font-weight:700;color:#1a202c;font-size:.95rem}
+#chat-subtitle{font-size:.8rem;color:#666;margin-top:.15rem}
+#chat-count{font-size:.75rem;color:#999;margin-top:.1rem}
+#chat-actions{display:flex;gap:.5rem;align-items:center;flex-wrap:wrap}
+.action-btn{padding:.45rem 1rem;border:none;border-radius:8px;cursor:pointer;font-size:.82rem;font-weight:600;transition:background .15s}
+#tomar-btn{background:#d69e2e;color:white}
 #tomar-btn:hover{background:#b7791f}
-#devolver-btn{background:#38a169;color:white;display:none}
+#devolver-btn{background:#38a169;color:white}
 #devolver-btn:hover{background:#276749}
+#finalizar-btn{background:#3182ce;color:white}
+#finalizar-btn:hover{background:#2b6cb0}
+#override-warning{font-size:.75rem;color:#e53e3e;background:#fff5f5;border:1px solid #fed7d7;border-radius:6px;padding:.3rem .6rem}
 #messages{flex:1;overflow-y:auto;padding:1rem;display:flex;flex-direction:column;gap:.4rem}
 .msg-wrap{display:flex;flex-direction:column}
 .msg{max-width:70%;padding:.6rem .9rem;border-radius:10px;font-size:.88rem;line-height:1.45;white-space:pre-wrap;word-break:break-word}
@@ -215,8 +304,9 @@ header h1{font-size:1.1rem}
 .msg-time{font-size:.68rem;color:#999;margin-top:.2rem}
 .msg-time-right{text-align:right}
 #input-area{background:white;padding:.75rem 1rem;display:flex;gap:.75rem;align-items:flex-end;border-top:1px solid #e2e8f0}
-#msg-input{flex:1;padding:.6rem .9rem;border:1px solid #e2e8f0;border-radius:20px;font-size:.9rem;resize:none;min-height:42px;max-height:120px;outline:none;font-family:inherit}
+#msg-input{flex:1;padding:.6rem .9rem;border:1px solid #e2e8f0;border-radius:20px;font-size:.9rem;resize:none;min-height:42px;max-height:120px;outline:none;font-family:inherit;transition:background .15s}
 #msg-input:focus{border-color:#128C7E}
+#msg-input:disabled{background:#f7f8fa;color:#999;cursor:not-allowed}
 #send-btn{background:#128C7E;color:white;border:none;border-radius:50%;width:42px;height:42px;cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0}
 #send-btn:disabled{background:#ccc;cursor:not-allowed}
 #empty-state{flex:1;display:flex;align-items:center;justify-content:center;color:#999;font-size:.95rem}
@@ -227,6 +317,7 @@ header h1{font-size:1.1rem}
   <div id="login-box">
     <h2>Naylan Admin</h2>
     <p>Panel de administración R8ATUR</p>
+    <input type="text" id="agent-name-input" placeholder="Tu nombre (opcional)" autocomplete="name">
     <input type="password" id="pw" placeholder="Contraseña" onkeydown="if(event.key==='Enter')login()">
     <button onclick="login()">Entrar</button>
     <p id="login-error">Contraseña incorrecta</p>
@@ -248,17 +339,19 @@ header h1{font-size:1.1rem}
         <div id="chat-header">
           <div id="chat-header-left">
             <div id="chat-phone"></div>
+            <div id="chat-subtitle"></div>
             <div id="chat-count"></div>
           </div>
           <div id="chat-actions">
-            <span id="status-badge"></span>
-            <button id="tomar-btn" class="action-btn" onclick="tomarConv()">👤 Tomar conversación</button>
-            <button id="devolver-btn" class="action-btn" onclick="devolverConv()">🤖 Devolver a Naylan</button>
+            <span id="override-warning" style="display:none"></span>
+            <button id="tomar-btn" class="action-btn" style="display:none" onclick="tomarConv()">👤 Tomar conversación</button>
+            <button id="devolver-btn" class="action-btn" style="display:none" onclick="devolverConv()">🤖 Devolver a Naylan</button>
+            <button id="finalizar-btn" class="action-btn" style="display:none" onclick="finalizarConv()">✅ Finalizar atención</button>
           </div>
         </div>
         <div id="messages"></div>
         <div id="input-area">
-          <textarea id="msg-input" placeholder="Escribe un mensaje como agente..." rows="1"
+          <textarea id="msg-input" rows="1"
             onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendMsg()}"
             oninput="this.style.height='auto';this.style.height=this.scrollHeight+'px'"></textarea>
           <button id="send-btn" onclick="sendMsg()">
@@ -270,44 +363,89 @@ header h1{font-size:1.1rem}
   </div>
 </div>
 <script>
-let key=null,phone=null,handoffStatus='BOT_ACTIVE',timer=null;
+let key=null,agentName='Agente R8A',phone=null,handoffStatus='BOT_ACTIVE',assignedAgent=null,handoffPriority='NORMAL',timer=null;
 
 function login(){
   const pw=document.getElementById('pw').value;
+  const nameVal=document.getElementById('agent-name-input').value.trim();
   if(!pw)return;
+  if(nameVal)agentName=nameVal;
   fetch('/admin/api/conversaciones',{headers:{'X-Admin-Key':pw}}).then(r=>{
-    if(r.ok){key=pw;localStorage.setItem('ak',pw);showApp();}
-    else{document.getElementById('login-error').style.display='block';}
+    if(r.ok){
+      key=pw;
+      localStorage.setItem('ak',pw);
+      if(nameVal)localStorage.setItem('agentName',nameVal);
+      showApp();
+    } else {
+      document.getElementById('login-error').style.display='block';
+    }
   }).catch(()=>{document.getElementById('login-error').style.display='block';});
 }
-function logout(){localStorage.removeItem('ak');key=null;phone=null;clearInterval(timer);document.getElementById('app').style.display='none';document.getElementById('login').style.display='flex';}
+
+function logout(){
+  localStorage.removeItem('ak');
+  key=null;phone=null;clearInterval(timer);
+  document.getElementById('app').style.display='none';
+  document.getElementById('login').style.display='flex';
+}
+
 function showApp(){
   document.getElementById('login').style.display='none';
   document.getElementById('app').style.display='flex';
   loadConvs();
   timer=setInterval(refresh,5000);
-  // Auto-seleccionar conversación desde ?conv= en la URL
   const p=new URLSearchParams(window.location.search).get('conv');
   if(p){setTimeout(()=>selectConvByPhone(p),800);}
+}
+
+function _sortConvs(data){
+  // Orden: WAITING_HUMAN CRITICAL → HIGH → NORMAL, luego HUMAN_ACTIVE, luego BOT_ACTIVE/RESOLVED
+  const rank=(d)=>{
+    const s=d.handoff_status||'BOT_ACTIVE';
+    const p=d.handoff_priority||'NORMAL';
+    if(s==='WAITING_HUMAN'){
+      if(p==='CRITICAL')return 0;
+      if(p==='HIGH')return 1;
+      return 2;
+    }
+    if(s==='HUMAN_ACTIVE')return 3;
+    if(s==='BOT_ACTIVE')return 4;
+    return 5;
+  };
+  return [...data].sort((a,b)=>{
+    const rd=rank(a)-rank(b);
+    if(rd!==0)return rd;
+    // Dentro del mismo grupo: más reciente primero
+    return new Date(b.ultimo_mensaje||0)-new Date(a.ultimo_mensaje||0);
+  });
 }
 
 async function loadConvs(){
   const r=await fetch('/admin/api/conversaciones',{headers:{'X-Admin-Key':key}});
   if(!r.ok){logout();return;}
-  const data=await r.json();
+  const rawData=await r.json();
+  const data=_sortConvs(rawData);
   const c=document.getElementById('conv-items');
   if(!data.length){c.innerHTML='<p style="padding:1rem;color:#999;font-size:.85rem">Sin conversaciones aún</p>';return;}
-  c.innerHTML=data.map(d=>`<div class="conv-item ${d.telefono===phone?'active':''}" onclick="selectConv('${d.telefono}','${d.handoff_status||'BOT_ACTIVE'}')">
-    <div class="conv-phone">${d.telefono}</div>
-    <div class="conv-meta">
-      <span class="badge badge-${d.handoff_status||'BOT_ACTIVE'}">${fmtStatus(d.handoff_status||'BOT_ACTIVE')}</span>
-      <span class="conv-time">${fmtTime(d.ultimo_mensaje)}</span>
-    </div>
-  </div>`).join('');
+  c.innerHTML=data.map(d=>{
+    const hs=d.handoff_status||'BOT_ACTIVE';
+    const hp=d.handoff_priority||'NORMAL';
+    const isCritical=hs==='WAITING_HUMAN'&&hp==='CRITICAL';
+    return `<div class="conv-item ${d.telefono===phone?'active':''}" onclick="selectConv('${d.telefono}','${hs}','${d.assigned_agent||''}','${hp}')">
+      <div class="conv-phone">${d.telefono}</div>
+      <div class="conv-meta">
+        <span class="badge badge-${hs}${isCritical?' critical':''}">${fmtStatus(hs,hp)}</span>
+        <span class="conv-time">${fmtTime(d.ultimo_mensaje)}</span>
+      </div>
+    </div>`;
+  }).join('');
 }
 
-async function selectConv(t,hs){
-  phone=t;handoffStatus=hs||'BOT_ACTIVE';
+async function selectConv(t,hs,aa,hp){
+  phone=t;
+  handoffStatus=hs||'BOT_ACTIVE';
+  assignedAgent=aa||null;
+  handoffPriority=hp||'NORMAL';
   document.getElementById('empty-state').style.display='none';
   document.getElementById('chat-content').style.display='flex';
   document.getElementById('chat-phone').textContent=t;
@@ -321,7 +459,7 @@ async function selectConvByPhone(p){
   if(!r.ok)return;
   const data=await r.json();
   const conv=data.find(d=>d.telefono===p||d.telefono===p.replace('+',''));
-  if(conv)await selectConv(conv.telefono,conv.handoff_status||'BOT_ACTIVE');
+  if(conv)await selectConv(conv.telefono,conv.handoff_status||'BOT_ACTIVE',conv.assigned_agent||'',conv.handoff_priority||'NORMAL');
 }
 
 async function loadChat(){
@@ -341,12 +479,15 @@ async function loadChat(){
 
 async function sendMsg(){
   if(!phone)return;
+  if(handoffStatus==='WAITING_HUMAN')return; // bloqueado
   const inp=document.getElementById('msg-input');
   const txt=inp.value.trim();if(!txt)return;
   document.getElementById('send-btn').disabled=true;
   inp.value='';inp.style.height='auto';
   await fetch('/admin/api/conversaciones/'+encodeURIComponent(phone)+'/mensaje',{
-    method:'POST',headers:{'X-Admin-Key':key,'Content-Type':'application/json'},body:JSON.stringify({texto:txt})
+    method:'POST',
+    headers:{'X-Admin-Key':key,'Content-Type':'application/json'},
+    body:JSON.stringify({texto:txt,agent_name:agentName})
   });
   document.getElementById('send-btn').disabled=false;
   await loadChat();inp.focus();
@@ -354,10 +495,18 @@ async function sendMsg(){
 
 async function tomarConv(){
   if(!phone)return;
-  await fetch('/admin/api/conversaciones/'+encodeURIComponent(phone)+'/tomar',{
-    method:'POST',headers:{'X-Admin-Key':key,'Content-Type':'application/json'},body:'{}'
+  const r=await fetch('/admin/api/conversaciones/'+encodeURIComponent(phone)+'/tomar',{
+    method:'POST',
+    headers:{'X-Admin-Key':key,'Content-Type':'application/json'},
+    body:JSON.stringify({agent_name:agentName})
   });
+  if(r.status===409){
+    const data=await r.json();
+    alert('Esta conversación ya fue tomada por '+( data.assigned_agent||'otro agente'));
+    await refresh();return;
+  }
   handoffStatus='HUMAN_ACTIVE';
+  assignedAgent=agentName;
   updateStatusUI();await loadConvs();
 }
 
@@ -366,44 +515,96 @@ async function devolverConv(){
   await fetch('/admin/api/conversaciones/'+encodeURIComponent(phone)+'/devolver',{
     method:'POST',headers:{'X-Admin-Key':key,'Content-Type':'application/json'},body:'{}'
   });
-  handoffStatus='BOT_ACTIVE';
+  handoffStatus='BOT_ACTIVE';assignedAgent=null;
+  updateStatusUI();await loadConvs();
+}
+
+async function finalizarConv(){
+  if(!phone)return;
+  if(!confirm('¿Finalizar la atención? La conversación volverá a Naylan y quedará como resuelta.'))return;
+  await fetch('/admin/api/conversaciones/'+encodeURIComponent(phone)+'/finalizar',{
+    method:'POST',headers:{'X-Admin-Key':key,'Content-Type':'application/json'},body:'{}'
+  });
+  handoffStatus='BOT_ACTIVE';assignedAgent=null;
   updateStatusUI();await loadConvs();
 }
 
 function updateStatusUI(){
-  const badge=document.getElementById('status-badge');
   const tomarBtn=document.getElementById('tomar-btn');
   const devolverBtn=document.getElementById('devolver-btn');
-  badge.textContent=fmtStatus(handoffStatus);
-  badge.className='badge badge-'+handoffStatus;
-  tomarBtn.style.display=handoffStatus==='WAITING_HUMAN'?'inline-block':'none';
-  devolverBtn.style.display=handoffStatus==='HUMAN_ACTIVE'?'inline-block':'none';
+  const finalizarBtn=document.getElementById('finalizar-btn');
+  const subtitle=document.getElementById('chat-subtitle');
+  const inp=document.getElementById('msg-input');
+  const sendBtn=document.getElementById('send-btn');
+  const overrideWarn=document.getElementById('override-warning');
+
+  // Reset
+  tomarBtn.style.display='none';
+  devolverBtn.style.display='none';
+  finalizarBtn.style.display='none';
+  overrideWarn.style.display='none';
+  inp.disabled=false;
+
+  if(handoffStatus==='BOT_ACTIVE'){
+    subtitle.textContent='🤖 Naylan activa';
+    inp.placeholder='Escribe un mensaje como Naylan...';
+    tomarBtn.style.display='inline-block';
+  } else if(handoffStatus==='WAITING_HUMAN'){
+    subtitle.textContent='🟡 Esperando agente humano';
+    inp.placeholder='Toma la conversación primero...';
+    inp.disabled=true;
+    sendBtn.disabled=true;
+    tomarBtn.style.display='inline-block';
+  } else if(handoffStatus==='HUMAN_ACTIVE'){
+    const aa=assignedAgent||'Agente';
+    subtitle.textContent='👤 Atención humana — '+aa;
+    inp.placeholder='Responder como agente...';
+    devolverBtn.style.display='inline-block';
+    finalizarBtn.style.display='inline-block';
+    // Mostrar warning si otro agente tiene la conv
+    if(assignedAgent&&assignedAgent!==agentName&&agentName!=='Agente R8A'){
+      overrideWarn.textContent='Atendida por '+assignedAgent;
+      overrideWarn.style.display='inline-block';
+    }
+  } else if(handoffStatus==='RESOLVED'){
+    subtitle.textContent='✅ Conversación resuelta';
+    inp.placeholder='Conversación finalizada. Puedes tomar de nuevo si es necesario.';
+    tomarBtn.style.display='inline-block';
+    tomarBtn.textContent='👤 Reabrir conversación';
+  }
+
+  if(handoffStatus!=='WAITING_HUMAN'){
+    sendBtn.disabled=false;
+  }
 }
 
 async function refresh(){
   if(!phone){await loadConvs();return;}
-  // Actualizar estado desde servidor
   const r=await fetch('/admin/api/conversaciones',{headers:{'X-Admin-Key':key}});
   if(!r.ok){logout();return;}
   const data=await r.json();
   const conv=data.find(d=>d.telefono===phone);
-  if(conv&&conv.handoff_status!==handoffStatus){
-    handoffStatus=conv.handoff_status||'BOT_ACTIVE';
-    updateStatusUI();
+  if(conv){
+    const newStatus=conv.handoff_status||'BOT_ACTIVE';
+    const newAgent=conv.assigned_agent||null;
+    const newPriority=conv.handoff_priority||'NORMAL';
+    if(newStatus!==handoffStatus||newAgent!==assignedAgent){
+      handoffStatus=newStatus;assignedAgent=newAgent;handoffPriority=newPriority;
+      updateStatusUI();
+    }
   }
-  const c=document.getElementById('conv-items');
-  if(c)c.innerHTML=data.map(d=>`<div class="conv-item ${d.telefono===phone?'active':''}" onclick="selectConv('${d.telefono}','${d.handoff_status||'BOT_ACTIVE'}')">
-    <div class="conv-phone">${d.telefono}</div>
-    <div class="conv-meta">
-      <span class="badge badge-${d.handoff_status||'BOT_ACTIVE'}">${fmtStatus(d.handoff_status||'BOT_ACTIVE')}</span>
-      <span class="conv-time">${fmtTime(d.ultimo_mensaje)}</span>
-    </div>
-  </div>`).join('');
+  await loadConvs();
   await loadChat();
 }
 
-function fmtStatus(s){
-  const m={'BOT_ACTIVE':'🤖 Bot','WAITING_HUMAN':'⏳ Esperando','HUMAN_ACTIVE':'👤 Humano','RESOLVED':'✅ Resuelto'};
+function fmtStatus(s,p){
+  if(s==='WAITING_HUMAN'&&p==='CRITICAL')return'🔴 URGENTE';
+  const m={
+    'BOT_ACTIVE':'🤖 BOT',
+    'WAITING_HUMAN':'🟡 ESPERA',
+    'HUMAN_ACTIVE':'👤 HUMANO',
+    'RESOLVED':'✅ Resuelto'
+  };
   return m[s]||s;
 }
 function fmtTime(s){
@@ -416,6 +617,8 @@ function esc(t){return t.replace(/&/g,'&amp;').split('<').join('&lt;').split('>'
 
 window.onload=()=>{
   const s=localStorage.getItem('ak');
+  const n=localStorage.getItem('agentName');
+  if(n)agentName=n;
   if(s){
     key=s;
     fetch('/admin/api/conversaciones',{headers:{'X-Admin-Key':key}})
@@ -468,18 +671,76 @@ async def admin_modo(telefono: str, body: ModoPayload, x_admin_key: str | None =
 
 
 @app.post("/admin/api/conversaciones/{telefono}/tomar")
-async def admin_tomar(telefono: str, x_admin_key: str | None = Header(default=None)):
-    """Agente toma la conversación → Naylan se pausa para este hilo."""
+async def admin_tomar(
+    telefono: str,
+    body: TomarPayload = TomarPayload(),
+    x_admin_key: str | None = Header(default=None),
+):
+    """
+    Agente toma la conversación → Naylan se pausa para este hilo.
+    Usa claim atómico para prevenir que 2 agentes tomen la misma conversación.
+    """
     _check_admin(x_admin_key)
-    await establecer_handoff(telefono, modo="humano", handoff_status="HUMAN_ACTIVE")
-    logger.info(f"Agente tomó conversación {telefono} → HUMAN_ACTIVE")
-    return {"ok": True, "handoff_status": "HUMAN_ACTIVE"}
+    agent_name = body.agent_name if body.agent_name else "Agente R8A"
+
+    resultado = await atomic_claim_conversation(telefono, agent_name)
+    if not resultado["success"]:
+        # Obtener quién la tiene para informar
+        registro = await obtener_registro_completo(telefono)
+        aa = registro.assigned_agent if registro else "otro agente"
+        raise HTTPException(
+            status_code=409,
+            detail={"error": "ya_tomada", "assigned_agent": aa}
+        )
+
+    logger.info(f"Agente '{agent_name}' tomó conversación {telefono} → HUMAN_ACTIVE")
+    return {"ok": True, "handoff_status": "HUMAN_ACTIVE", "assigned_agent": agent_name}
 
 
 @app.post("/admin/api/conversaciones/{telefono}/devolver")
 async def admin_devolver(telefono: str, x_admin_key: str | None = Header(default=None)):
     """Agente devuelve la conversación a Naylan."""
     _check_admin(x_admin_key)
-    await establecer_handoff(telefono, modo="bot", handoff_status="BOT_ACTIVE")
+    await establecer_handoff(
+        telefono, modo="bot", handoff_status="BOT_ACTIVE", assigned_agent=None
+    )
     logger.info(f"Conversación {telefono} devuelta a Naylan → BOT_ACTIVE")
     return {"ok": True, "handoff_status": "BOT_ACTIVE"}
+
+
+@app.post("/admin/api/conversaciones/{telefono}/finalizar")
+async def admin_finalizar(telefono: str, x_admin_key: str | None = Header(default=None)):
+    """
+    Finaliza la atención humana. Diferente a /devolver en UX:
+    marca la conversación como RESOLVED, libera el agente asignado,
+    y registra resolved_at para métricas. El historial se preserva.
+    """
+    _check_admin(x_admin_key)
+    from datetime import datetime as _dt
+    from sqlalchemy import select as _select
+    from agent.memory import ConversacionModo, get_session
+
+    async with get_session()() as session:
+        result = await session.execute(
+            _select(ConversacionModo).where(ConversacionModo.telefono == telefono)
+        )
+        registro = result.scalar_one_or_none()
+        ahora = _dt.utcnow()
+        if registro:
+            registro.modo = "bot"
+            registro.handoff_status = "RESOLVED"
+            registro.assigned_agent = None
+            registro.resolved_at = ahora
+            registro.updated_at = ahora
+        else:
+            session.add(ConversacionModo(
+                telefono=telefono,
+                modo="bot",
+                handoff_status="RESOLVED",
+                resolved_at=ahora,
+                updated_at=ahora,
+            ))
+        await session.commit()
+
+    logger.info(f"Conversación {telefono} finalizada → RESOLVED")
+    return {"ok": True, "handoff_status": "RESOLVED"}

@@ -3,7 +3,7 @@ import os
 from datetime import datetime
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
-from sqlalchemy import String, Text, DateTime, select, Integer, func, text
+from sqlalchemy import String, Text, DateTime, Boolean, select, Integer, func, text, update
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -59,6 +59,11 @@ class ConversacionModo(Base):
     handoff_status: Mapped[str] = mapped_column(String(30), default="BOT_ACTIVE")
     assigned_agent: Mapped[str | None] = mapped_column(String(100), nullable=True)
     handoff_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    handoff_priority: Mapped[str] = mapped_column(String(20), default="NORMAL")  # NORMAL|HIGH|CRITICAL
+    notification_sent: Mapped[bool] = mapped_column(Boolean, default=False)
+    notification_sent_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    claimed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
@@ -70,6 +75,11 @@ async def inicializar_db():
             "ALTER TABLE conversacion_modo ADD COLUMN handoff_status VARCHAR(30) DEFAULT 'BOT_ACTIVE'",
             "ALTER TABLE conversacion_modo ADD COLUMN assigned_agent VARCHAR(100)",
             "ALTER TABLE conversacion_modo ADD COLUMN handoff_summary TEXT",
+            "ALTER TABLE conversacion_modo ADD COLUMN handoff_priority VARCHAR(20) DEFAULT 'NORMAL'",
+            "ALTER TABLE conversacion_modo ADD COLUMN notification_sent BOOLEAN DEFAULT 0",
+            "ALTER TABLE conversacion_modo ADD COLUMN notification_sent_at DATETIME",
+            "ALTER TABLE conversacion_modo ADD COLUMN claimed_at DATETIME",
+            "ALTER TABLE conversacion_modo ADD COLUMN resolved_at DATETIME",
         ]:
             try:
                 await conn.execute(text(sql))
@@ -133,14 +143,22 @@ async def establecer_modo(telefono: str, modo: str):
         await session.commit()
 
 
+_UNSET = object()  # Sentinel para distinguir "no especificado" de None explícito
+
+
 async def establecer_handoff(
     telefono: str,
     modo: str,
     handoff_status: str,
-    assigned_agent: str | None = None,
-    handoff_summary: str | None = None,
+    assigned_agent: str | None | object = _UNSET,
+    handoff_summary: str | None | object = _UNSET,
+    handoff_priority: str = "NORMAL",
 ):
-    """Actualiza modo y estado de handoff de una conversación."""
+    """
+    Actualiza modo y estado de handoff de una conversación.
+    Si assigned_agent=None se pasa explícitamente, borra el campo (limpia el agente).
+    Si no se pasa (sentinel _UNSET), no toca el campo existente.
+    """
     async with get_session()() as session:
         result = await session.execute(
             select(ConversacionModo).where(ConversacionModo.telefono == telefono)
@@ -149,21 +167,64 @@ async def establecer_handoff(
         if registro:
             registro.modo = modo
             registro.handoff_status = handoff_status
-            if assigned_agent is not None:
-                registro.assigned_agent = assigned_agent
-            if handoff_summary is not None:
-                registro.handoff_summary = handoff_summary
+            registro.handoff_priority = handoff_priority
+            if assigned_agent is not _UNSET:
+                registro.assigned_agent = assigned_agent  # type: ignore[assignment]
+            if handoff_summary is not _UNSET:
+                registro.handoff_summary = handoff_summary  # type: ignore[assignment]
             registro.updated_at = datetime.utcnow()
         else:
             session.add(ConversacionModo(
                 telefono=telefono,
                 modo=modo,
                 handoff_status=handoff_status,
-                assigned_agent=assigned_agent,
-                handoff_summary=handoff_summary,
+                assigned_agent=assigned_agent if assigned_agent is not _UNSET else None,  # type: ignore[arg-type]
+                handoff_summary=handoff_summary if handoff_summary is not _UNSET else None,  # type: ignore[arg-type]
+                handoff_priority=handoff_priority,
                 updated_at=datetime.utcnow(),
             ))
         await session.commit()
+
+
+async def atomic_claim_conversation(telefono: str, agent_name: str) -> dict:
+    """
+    Reclama atómicamente una conversación para un agente.
+    Solo tiene éxito si el estado actual es WAITING_HUMAN o BOT_ACTIVE.
+    Retorna {"success": True} o {"success": False, "reason": "ya_tomada"}.
+    """
+    async with get_session()() as session:
+        result = await session.execute(
+            update(ConversacionModo)
+            .where(
+                ConversacionModo.telefono == telefono,
+                ConversacionModo.handoff_status.in_(["WAITING_HUMAN", "BOT_ACTIVE"])
+            )
+            .values(
+                modo="humano",
+                handoff_status="HUMAN_ACTIVE",
+                assigned_agent=agent_name,
+                claimed_at=datetime.utcnow(),
+                updated_at=datetime.utcnow(),
+            )
+        )
+        await session.commit()
+        if result.rowcount == 0:
+            return {"success": False, "reason": "ya_tomada"}
+        return {"success": True}
+
+
+async def marcar_notificacion_enviada(telefono: str):
+    """Marca que ya se envió notificación de handoff para esta conversación."""
+    async with get_session()() as session:
+        result = await session.execute(
+            select(ConversacionModo).where(ConversacionModo.telefono == telefono)
+        )
+        registro = result.scalar_one_or_none()
+        if registro:
+            registro.notification_sent = True
+            registro.notification_sent_at = datetime.utcnow()
+            registro.updated_at = datetime.utcnow()
+            await session.commit()
 
 
 async def obtener_handoff_status(telefono: str) -> str:
@@ -182,6 +243,15 @@ async def obtener_handoff_resumen(telefono: str) -> str | None:
         )
         registro = result.scalar_one_or_none()
         return registro.handoff_summary if registro else None
+
+
+async def obtener_registro_completo(telefono: str) -> ConversacionModo | None:
+    """Retorna el registro completo de ConversacionModo para un teléfono."""
+    async with get_session()() as session:
+        result = await session.execute(
+            select(ConversacionModo).where(ConversacionModo.telefono == telefono)
+        )
+        return result.scalar_one_or_none()
 
 
 async def listar_conversaciones() -> list[dict]:
@@ -213,6 +283,8 @@ async def listar_conversaciones() -> list[dict]:
                 "total_mensajes": row.total_mensajes,
                 "modo": estados[row.telefono].modo if row.telefono in estados else "bot",
                 "handoff_status": estados[row.telefono].handoff_status if row.telefono in estados else "BOT_ACTIVE",
+                "handoff_priority": estados[row.telefono].handoff_priority if row.telefono in estados else "NORMAL",
+                "assigned_agent": estados[row.telefono].assigned_agent if row.telefono in estados else None,
             }
             for row in rows
         ]
