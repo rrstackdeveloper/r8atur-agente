@@ -1,7 +1,9 @@
 # agent/main.py — Servidor FastAPI + Webhook de WhatsApp para R8ATUR
 import os
+import time
 import yaml
 import logging
+from collections import deque
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, HTTPException, Header, Depends
 from fastapi.responses import PlainTextResponse, HTMLResponse, JSONResponse
@@ -28,6 +30,25 @@ logging.basicConfig(level=log_level)
 logger = logging.getLogger("agentkit")
 
 proveedor: ProveedorWhatsApp | None = None
+
+# Rate limiting por número de teléfono (en memoria, single-instance)
+_RL_MAX: int = int(os.getenv("RATE_LIMIT_MAX", "10"))    # mensajes máx por ventana
+_RL_WINDOW: int = int(os.getenv("RATE_LIMIT_WINDOW", "60"))  # ventana en segundos
+_rl_store: dict[str, deque] = {}
+
+
+def _rate_limit_ok(telefono: str) -> bool:
+    """Desliza ventana de tiempo y retorna False si el teléfono excede el límite."""
+    now = time.monotonic()
+    if telefono not in _rl_store:
+        _rl_store[telefono] = deque()
+    q = _rl_store[telefono]
+    while q and q[0] < now - _RL_WINDOW:
+        q.popleft()
+    if len(q) >= _RL_MAX:
+        return False
+    q.append(now)
+    return True
 
 
 async def seed_agentes_desde_config():
@@ -193,6 +214,13 @@ async def webhook_handler(request: Request):
 
         for msg in mensajes:
             if msg.es_propio or not msg.texto:
+                continue
+
+            if not _rate_limit_ok(msg.telefono):
+                logger.warning(
+                    f"Rate limit excedido para {msg.telefono} "
+                    f"(>{_RL_MAX} msgs en {_RL_WINDOW}s) — mensaje ignorado"
+                )
                 continue
 
             logger.info(f"Mensaje de {msg.telefono}: {msg.texto}")
