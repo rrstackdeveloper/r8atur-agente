@@ -1,5 +1,7 @@
 # agent/brain.py — Cerebro del agente: conexión con Claude API
 import os
+import re
+import json
 import yaml
 import logging
 from anthropic import AsyncAnthropic
@@ -34,6 +36,27 @@ def obtener_mensaje_error() -> str:
 def obtener_mensaje_fallback() -> str:
     config = cargar_config_prompts()
     return config.get("fallback_message", "Disculpa, no entendí tu mensaje. ¿Podrías reformularlo?")
+
+
+def extraer_escalado(response: str) -> tuple[str, dict | None]:
+    """
+    Detecta y extrae la señal [ESCALATE:{...}] del final de la respuesta de Claude.
+    Retorna (respuesta_limpia, datos_del_handoff_o_None).
+    """
+    marker = "[ESCALATE:"
+    idx = response.rfind(marker)
+    if idx == -1:
+        return response, None
+    end_idx = response.find("]", idx + len(marker))
+    if end_idx == -1:
+        return response, None
+    json_str = response[idx + len(marker):end_idx]
+    clean = response[:idx].strip()
+    try:
+        data = json.loads(json_str)
+    except (json.JSONDecodeError, ValueError):
+        data = {}
+    return clean, data
 
 
 async def generar_respuesta(mensaje: str, historial: list[dict]) -> str:
