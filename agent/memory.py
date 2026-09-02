@@ -100,15 +100,16 @@ async def inicializar_db():
 
     # Cada migración en su propia transacción — si falla (columna ya existe) no
     # afecta a las demás ni revierte el CREATE TABLE anterior. Crítico en PostgreSQL.
+    # Tipos usados: TIMESTAMP (válido en PostgreSQL y SQLite), FALSE (válido en ambos).
     for sql in [
-        "ALTER TABLE conversacion_modo ADD COLUMN handoff_status VARCHAR(30) DEFAULT 'BOT_ACTIVE'",
-        "ALTER TABLE conversacion_modo ADD COLUMN assigned_agent VARCHAR(100)",
-        "ALTER TABLE conversacion_modo ADD COLUMN handoff_summary TEXT",
-        "ALTER TABLE conversacion_modo ADD COLUMN handoff_priority VARCHAR(20) DEFAULT 'NORMAL'",
-        "ALTER TABLE conversacion_modo ADD COLUMN notification_sent BOOLEAN DEFAULT 0",
-        "ALTER TABLE conversacion_modo ADD COLUMN notification_sent_at DATETIME",
-        "ALTER TABLE conversacion_modo ADD COLUMN claimed_at DATETIME",
-        "ALTER TABLE conversacion_modo ADD COLUMN resolved_at DATETIME",
+        "ALTER TABLE conversacion_modo ADD COLUMN IF NOT EXISTS handoff_status VARCHAR(30) DEFAULT 'BOT_ACTIVE'",
+        "ALTER TABLE conversacion_modo ADD COLUMN IF NOT EXISTS assigned_agent VARCHAR(100)",
+        "ALTER TABLE conversacion_modo ADD COLUMN IF NOT EXISTS handoff_summary TEXT",
+        "ALTER TABLE conversacion_modo ADD COLUMN IF NOT EXISTS handoff_priority VARCHAR(20) DEFAULT 'NORMAL'",
+        "ALTER TABLE conversacion_modo ADD COLUMN IF NOT EXISTS notification_sent BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE conversacion_modo ADD COLUMN IF NOT EXISTS notification_sent_at TIMESTAMP",
+        "ALTER TABLE conversacion_modo ADD COLUMN IF NOT EXISTS claimed_at TIMESTAMP",
+        "ALTER TABLE conversacion_modo ADD COLUMN IF NOT EXISTS resolved_at TIMESTAMP",
     ]:
         try:
             async with get_engine().begin() as conn:
