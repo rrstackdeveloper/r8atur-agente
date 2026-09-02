@@ -39,6 +39,15 @@ class ProveedorMeta(ProveedorWhatsApp):
                     tipo = msg.get("type")
                     if tipo == "text":
                         texto = msg.get("text", {}).get("body", "")
+                    elif tipo == "audio":
+                        media_id = msg.get("audio", {}).get("id")
+                        if not media_id or not self.access_token:
+                            continue
+                        from agent.transcriber import transcribir_audio_meta
+                        texto = await transcribir_audio_meta(media_id, self.access_token)
+                        if not texto:
+                            continue
+                        logger.info(f"Audio transcrito: {texto}")
                     else:
                         continue
                     mensajes.append(MensajeEntrante(
