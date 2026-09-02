@@ -3,7 +3,7 @@ import os
 import yaml
 import logging
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, Request, HTTPException, Header
+from fastapi import FastAPI, Request, HTTPException, Header, Depends
 from fastapi.responses import PlainTextResponse, HTMLResponse, JSONResponse
 from pydantic import BaseModel
 from dotenv import load_dotenv
@@ -14,6 +14,8 @@ from agent.memory import (
     obtener_modo, establecer_modo, establecer_handoff,
     obtener_handoff_status, listar_conversaciones, obtener_historial_completo,
     atomic_claim_conversation, marcar_notificacion_enviada, obtener_registro_completo,
+    validar_token, validar_credenciales, crear_sesion, invalidar_sesion,
+    crear_agente, cambiar_password,
 )
 from agent.providers import obtener_proveedor
 from agent.providers.base import ProveedorWhatsApp
@@ -28,11 +30,38 @@ logger = logging.getLogger("agentkit")
 proveedor: ProveedorWhatsApp | None = None
 
 
+async def seed_agentes_desde_config():
+    """
+    Crea agentes en BD desde config/agents.yaml + env vars AGENT_{ID}_PASSWORD.
+    Solo crea — nunca sobreescribe passwords existentes.
+    """
+    try:
+        with open("config/agents.yaml", "r", encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+    except FileNotFoundError:
+        return
+    for ag in data.get("agents", []):
+        if not ag.get("enabled", False):
+            continue
+        agente_id = ag.get("id", "")
+        if not agente_id:
+            continue
+        env_var = f"AGENT_{agente_id.upper()}_PASSWORD"
+        password = os.getenv(env_var, "")
+        if not password:
+            logger.warning(f"Agente '{agente_id}': {env_var} no configurada — login individual deshabilitado")
+            continue
+        creado = await crear_agente(agente_id, ag.get("nombre", agente_id), password, ag.get("rol", "agente"))
+        if creado:
+            logger.info(f"Agente '{agente_id}' ({ag.get('nombre', agente_id)}) creado en BD")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global proveedor
     proveedor = obtener_proveedor()
     await inicializar_db()
+    await seed_agentes_desde_config()
     PORT = os.getenv("PORT", "8000")
     logger.info(f"Servidor Naylan (R8ATUR) en puerto {PORT}")
     logger.info(f"Proveedor: {proveedor.__class__.__name__}")
@@ -219,29 +248,68 @@ async def webhook_handler(request: Request):
 
 class MensajeAdmin(BaseModel):
     texto: str
-    agent_name: str | None = None  # Opcional: para futura diferenciación en historial
 
 
 class ModoPayload(BaseModel):
     modo: str
 
 
-class TomarPayload(BaseModel):
-    agent_name: str | None = None  # Si se omite, usa "Agente R8A" como default
+class LoginPayload(BaseModel):
+    username: str
+    password: str
 
 
-def _check_admin(x_admin_key: str | None) -> None:
-    password = os.getenv("ADMIN_PASSWORD", "")
-    if not password or x_admin_key != password:
-        raise HTTPException(status_code=401, detail="No autorizado")
+class ResetPasswordPayload(BaseModel):
+    password: str
 
 
-# NOTA ARQUITECTURA: AGENT_IDENTITY_REQUIRED
-# El sistema tiene un único password de admin compartido. No hay cuentas individuales por agente.
-# Por eso no podemos verificar automáticamente qué agente específico está tomando la conversación.
-# El campo agent_name en TomarPayload permite que el frontend lo envíe si lo conoce;
-# si no se envía, se asigna "Agente R8A" como default.
-# Para implementar identidades individuales se requiere: sistema de autenticación por agente (JWT, sesiones).
+async def _get_agente(
+    x_agent_token: str | None = Header(default=None),
+    x_admin_key: str | None = Header(default=None),
+) -> dict:
+    """
+    Dependency FastAPI para autenticación de agentes.
+    Acepta X-Agent-Token (sesión individual) o X-Admin-Key (acceso maestro legacy).
+    Devuelve dict con id, nombre y tipo del agente autenticado.
+    """
+    if x_agent_token:
+        agente = await validar_token(x_agent_token)
+        if agente:
+            return {"id": agente.id, "nombre": agente.nombre, "tipo": "agente"}
+    if x_admin_key and x_admin_key == os.getenv("ADMIN_PASSWORD", ""):
+        return {"id": "admin", "nombre": "Admin", "tipo": "admin"}
+    raise HTTPException(status_code=401, detail="No autorizado")
+
+
+@app.post("/admin/auth/login")
+async def admin_login(body: LoginPayload):
+    agente = await validar_credenciales(body.username, body.password)
+    if not agente:
+        raise HTTPException(status_code=401, detail="Credenciales incorrectas")
+    token, expires_at = await crear_sesion(agente.id, agente.nombre)
+    logger.info(f"Login: agente '{agente.id}' ({agente.nombre})")
+    return {"token": token, "nombre": agente.nombre, "expires_at": expires_at.isoformat()}
+
+
+@app.post("/admin/auth/logout")
+async def admin_logout(x_agent_token: str | None = Header(default=None)):
+    if x_agent_token:
+        await invalidar_sesion(x_agent_token)
+    return {"ok": True}
+
+
+@app.post("/admin/agentes/{agente_id}/reset-password")
+async def admin_reset_password(
+    agente_id: str,
+    body: ResetPasswordPayload,
+    agente: dict = Depends(_get_agente),
+):
+    ok = await cambiar_password(agente_id, body.password)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Agente no encontrado")
+    logger.info(f"Password cambiado para agente '{agente_id}' por '{agente['id']}'")
+    return {"ok": True}
+
 
 _ADMIN_HTML = """<!DOCTYPE html>
 <html lang="es">
@@ -317,15 +385,16 @@ header h1{font-size:1.1rem}
   <div id="login-box">
     <h2>Naylan Admin</h2>
     <p>Panel de administración R8ATUR</p>
-    <input type="text" id="agent-name-input" placeholder="Tu nombre (opcional)" autocomplete="name">
-    <input type="password" id="pw" placeholder="Contraseña" onkeydown="if(event.key==='Enter')login()">
+    <input type="text" id="username-input" placeholder="Usuario (alejandro / yanara / jose)" autocomplete="username" onkeydown="if(event.key==='Enter')document.getElementById('pw').focus()">
+    <input type="password" id="pw" placeholder="Contraseña" autocomplete="current-password" onkeydown="if(event.key==='Enter')login()">
     <button onclick="login()">Entrar</button>
-    <p id="login-error">Contraseña incorrecta</p>
+    <p id="login-error">Usuario o contraseña incorrectos</p>
   </div>
 </div>
 <div id="app">
   <header>
     <h1>Naylan Admin — R8ATUR</h1>
+    <span id="agent-display" style="font-size:.85rem;opacity:.85"></span>
     <button id="logout-btn" onclick="logout()">Salir</button>
   </header>
   <div class="content">
@@ -363,27 +432,41 @@ header h1{font-size:1.1rem}
   </div>
 </div>
 <script>
-let key=null,agentName='Agente R8A',phone=null,handoffStatus='BOT_ACTIVE',assignedAgent=null,handoffPriority='NORMAL',timer=null;
+let key=null,agentName='',phone=null,handoffStatus='BOT_ACTIVE',assignedAgent=null,handoffPriority='NORMAL',timer=null;
 
-function login(){
+function apiH(){return{'X-Agent-Token':key,'Content-Type':'application/json'};}
+function apiHGet(){return{'X-Agent-Token':key};}
+
+async function login(){
+  const username=document.getElementById('username-input').value.trim();
   const pw=document.getElementById('pw').value;
-  const nameVal=document.getElementById('agent-name-input').value.trim();
-  if(!pw)return;
-  if(nameVal)agentName=nameVal;
-  fetch('/admin/api/conversaciones',{headers:{'X-Admin-Key':pw}}).then(r=>{
+  if(!username||!pw)return;
+  const err=document.getElementById('login-error');
+  err.style.display='none';
+  try{
+    const r=await fetch('/admin/auth/login',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({username,password:pw})
+    });
     if(r.ok){
-      key=pw;
-      localStorage.setItem('ak',pw);
-      if(nameVal)localStorage.setItem('agentName',nameVal);
+      const data=await r.json();
+      key=data.token;
+      agentName=data.nombre;
+      localStorage.setItem('ak',data.token);
+      localStorage.setItem('agentName',data.nombre);
       showApp();
     } else {
-      document.getElementById('login-error').style.display='block';
+      err.style.display='block';
     }
-  }).catch(()=>{document.getElementById('login-error').style.display='block';});
+  }catch(e){err.style.display='block';}
 }
 
-function logout(){
-  localStorage.removeItem('ak');
+async function logout(){
+  if(key){
+    try{await fetch('/admin/auth/logout',{method:'POST',headers:{'X-Agent-Token':key}});}catch(_){}
+  }
+  localStorage.removeItem('ak');localStorage.removeItem('agentName');
   key=null;phone=null;clearInterval(timer);
   document.getElementById('app').style.display='none';
   document.getElementById('login').style.display='flex';
@@ -392,6 +475,7 @@ function logout(){
 function showApp(){
   document.getElementById('login').style.display='none';
   document.getElementById('app').style.display='flex';
+  document.getElementById('agent-display').textContent='👤 '+agentName;
   loadConvs();
   timer=setInterval(refresh,5000);
   const p=new URLSearchParams(window.location.search).get('conv');
@@ -421,7 +505,7 @@ function _sortConvs(data){
 }
 
 async function loadConvs(){
-  const r=await fetch('/admin/api/conversaciones',{headers:{'X-Admin-Key':key}});
+  const r=await fetch('/admin/api/conversaciones',{headers:apiHGet()});
   if(!r.ok){logout();return;}
   const rawData=await r.json();
   const data=_sortConvs(rawData);
@@ -455,7 +539,7 @@ async function selectConv(t,hs,aa,hp){
 }
 
 async function selectConvByPhone(p){
-  const r=await fetch('/admin/api/conversaciones',{headers:{'X-Admin-Key':key}});
+  const r=await fetch('/admin/api/conversaciones',{headers:apiHGet()});
   if(!r.ok)return;
   const data=await r.json();
   const conv=data.find(d=>d.telefono===p||d.telefono===p.replace('+',''));
@@ -464,7 +548,7 @@ async function selectConvByPhone(p){
 
 async function loadChat(){
   if(!phone)return;
-  const r=await fetch('/admin/api/conversaciones/'+encodeURIComponent(phone)+'/historial',{headers:{'X-Admin-Key':key}});
+  const r=await fetch('/admin/api/conversaciones/'+encodeURIComponent(phone)+'/historial',{headers:apiHGet()});
   if(!r.ok)return;
   const msgs=await r.json();
   const el=document.getElementById('messages');
@@ -486,8 +570,8 @@ async function sendMsg(){
   inp.value='';inp.style.height='auto';
   await fetch('/admin/api/conversaciones/'+encodeURIComponent(phone)+'/mensaje',{
     method:'POST',
-    headers:{'X-Admin-Key':key,'Content-Type':'application/json'},
-    body:JSON.stringify({texto:txt,agent_name:agentName})
+    headers:apiH(),
+    body:JSON.stringify({texto:txt})
   });
   document.getElementById('send-btn').disabled=false;
   await loadChat();inp.focus();
@@ -497,8 +581,8 @@ async function tomarConv(){
   if(!phone)return;
   const r=await fetch('/admin/api/conversaciones/'+encodeURIComponent(phone)+'/tomar',{
     method:'POST',
-    headers:{'X-Admin-Key':key,'Content-Type':'application/json'},
-    body:JSON.stringify({agent_name:agentName})
+    headers:apiH(),
+    body:'{}'
   });
   if(r.status===409){
     const data=await r.json();
@@ -513,7 +597,7 @@ async function tomarConv(){
 async function devolverConv(){
   if(!phone)return;
   await fetch('/admin/api/conversaciones/'+encodeURIComponent(phone)+'/devolver',{
-    method:'POST',headers:{'X-Admin-Key':key,'Content-Type':'application/json'},body:'{}'
+    method:'POST',headers:apiH(),body:'{}'
   });
   handoffStatus='BOT_ACTIVE';assignedAgent=null;
   updateStatusUI();await loadConvs();
@@ -523,7 +607,7 @@ async function finalizarConv(){
   if(!phone)return;
   if(!confirm('¿Finalizar la atención? La conversación volverá a Naylan y quedará como resuelta.'))return;
   await fetch('/admin/api/conversaciones/'+encodeURIComponent(phone)+'/finalizar',{
-    method:'POST',headers:{'X-Admin-Key':key,'Content-Type':'application/json'},body:'{}'
+    method:'POST',headers:apiH(),body:'{}'
   });
   handoffStatus='BOT_ACTIVE';assignedAgent=null;
   updateStatusUI();await loadConvs();
@@ -580,7 +664,7 @@ function updateStatusUI(){
 
 async function refresh(){
   if(!phone){await loadConvs();return;}
-  const r=await fetch('/admin/api/conversaciones',{headers:{'X-Admin-Key':key}});
+  const r=await fetch('/admin/api/conversaciones',{headers:apiHGet()});
   if(!r.ok){logout();return;}
   const data=await r.json();
   const conv=data.find(d=>d.telefono===phone);
@@ -621,7 +705,7 @@ window.onload=()=>{
   if(n)agentName=n;
   if(s){
     key=s;
-    fetch('/admin/api/conversaciones',{headers:{'X-Admin-Key':key}})
+    fetch('/admin/api/conversaciones',{headers:apiHGet()})
       .then(r=>{if(r.ok)showApp();else{key=null;localStorage.removeItem('ak');}})
       .catch(()=>{key=null;localStorage.removeItem('ak');});
   }
@@ -633,26 +717,25 @@ window.onload=()=>{
 
 @app.get("/admin", response_class=HTMLResponse)
 async def admin_dashboard():
-    if not os.getenv("ADMIN_PASSWORD"):
-        raise HTTPException(status_code=404)
     return HTMLResponse(_ADMIN_HTML)
 
 
 @app.get("/admin/api/conversaciones")
-async def admin_listar(x_admin_key: str | None = Header(default=None)):
-    _check_admin(x_admin_key)
+async def admin_listar(agente: dict = Depends(_get_agente)):
     return await listar_conversaciones()
 
 
 @app.get("/admin/api/conversaciones/{telefono}/historial")
-async def admin_historial(telefono: str, x_admin_key: str | None = Header(default=None)):
-    _check_admin(x_admin_key)
+async def admin_historial(telefono: str, agente: dict = Depends(_get_agente)):
     return await obtener_historial_completo(telefono)
 
 
 @app.post("/admin/api/conversaciones/{telefono}/mensaje")
-async def admin_enviar(telefono: str, body: MensajeAdmin, x_admin_key: str | None = Header(default=None)):
-    _check_admin(x_admin_key)
+async def admin_enviar(
+    telefono: str,
+    body: MensajeAdmin,
+    agente: dict = Depends(_get_agente),
+):
     if proveedor is None:
         raise HTTPException(status_code=503, detail="Proveedor no inicializado")
     ok = await proveedor.enviar_mensaje(telefono, body.texto)
@@ -662,8 +745,11 @@ async def admin_enviar(telefono: str, body: MensajeAdmin, x_admin_key: str | Non
 
 
 @app.post("/admin/api/conversaciones/{telefono}/modo")
-async def admin_modo(telefono: str, body: ModoPayload, x_admin_key: str | None = Header(default=None)):
-    _check_admin(x_admin_key)
+async def admin_modo(
+    telefono: str,
+    body: ModoPayload,
+    agente: dict = Depends(_get_agente),
+):
     if body.modo not in ("bot", "humano"):
         raise HTTPException(status_code=400, detail="modo debe ser 'bot' o 'humano'")
     await establecer_modo(telefono, body.modo)
@@ -673,15 +759,14 @@ async def admin_modo(telefono: str, body: ModoPayload, x_admin_key: str | None =
 @app.post("/admin/api/conversaciones/{telefono}/tomar")
 async def admin_tomar(
     telefono: str,
-    body: TomarPayload = TomarPayload(),
-    x_admin_key: str | None = Header(default=None),
+    agente: dict = Depends(_get_agente),
 ):
     """
     Agente toma la conversación → Naylan se pausa para este hilo.
     Usa claim atómico para prevenir que 2 agentes tomen la misma conversación.
+    El nombre del agente se obtiene de la sesión autenticada.
     """
-    _check_admin(x_admin_key)
-    agent_name = body.agent_name if body.agent_name else "Agente R8A"
+    agent_name = agente["nombre"]
 
     resultado = await atomic_claim_conversation(telefono, agent_name)
     if not resultado["success"]:
@@ -698,9 +783,8 @@ async def admin_tomar(
 
 
 @app.post("/admin/api/conversaciones/{telefono}/devolver")
-async def admin_devolver(telefono: str, x_admin_key: str | None = Header(default=None)):
+async def admin_devolver(telefono: str, agente: dict = Depends(_get_agente)):
     """Agente devuelve la conversación a Naylan."""
-    _check_admin(x_admin_key)
     await establecer_handoff(
         telefono, modo="bot", handoff_status="BOT_ACTIVE", assigned_agent=None
     )
@@ -709,13 +793,12 @@ async def admin_devolver(telefono: str, x_admin_key: str | None = Header(default
 
 
 @app.post("/admin/api/conversaciones/{telefono}/finalizar")
-async def admin_finalizar(telefono: str, x_admin_key: str | None = Header(default=None)):
+async def admin_finalizar(telefono: str, agente: dict = Depends(_get_agente)):
     """
-    Finaliza la atención humana. Diferente a /devolver en UX:
-    marca la conversación como RESOLVED, libera el agente asignado,
-    y registra resolved_at para métricas. El historial se preserva.
+    Finaliza la atención humana. Marca la conversación como RESOLVED,
+    libera el agente asignado y registra resolved_at para métricas.
+    El historial se preserva.
     """
-    _check_admin(x_admin_key)
     from datetime import datetime as _dt
     from sqlalchemy import select as _select
     from agent.memory import ConversacionModo, get_session

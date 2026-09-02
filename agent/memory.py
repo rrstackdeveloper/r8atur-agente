@@ -1,6 +1,9 @@
 # agent/memory.py — Memoria de conversaciones con SQLite/PostgreSQL
 import os
-from datetime import datetime
+import hashlib
+import secrets
+import uuid
+from datetime import datetime, timedelta
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy import String, Text, DateTime, Boolean, select, Integer, func, text, update
@@ -49,6 +52,29 @@ class Mensaje(Base):
     role: Mapped[str] = mapped_column(String(20))
     content: Mapped[str] = mapped_column(Text)
     timestamp: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class Agente(Base):
+    """Agente humano autorizado para atender conversaciones."""
+    __tablename__ = "agentes"
+
+    id: Mapped[str] = mapped_column(String(50), primary_key=True)
+    nombre: Mapped[str] = mapped_column(String(100))
+    password_hash: Mapped[str] = mapped_column(String(300))
+    rol: Mapped[str] = mapped_column(String(50), default="agente")
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class AgenteSesion(Base):
+    """Sesión activa de un agente (token de acceso con expiración)."""
+    __tablename__ = "agente_sesiones"
+
+    token: Mapped[str] = mapped_column(String(100), primary_key=True)
+    agente_id: Mapped[str] = mapped_column(String(50))
+    agente_nombre: Mapped[str] = mapped_column(String(100))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    expires_at: Mapped[datetime] = mapped_column(DateTime)
 
 
 class ConversacionModo(Base):
@@ -305,3 +331,118 @@ async def obtener_historial_completo(telefono: str, limite: int = 50) -> list[di
             {"role": msg.role, "content": msg.content, "timestamp": msg.timestamp.isoformat()}
             for msg in mensajes
         ]
+
+
+# ─── Autenticación individual de agentes ─────────────────────────────────────
+
+def hash_password(password: str) -> str:
+    """PBKDF2-HMAC-SHA256 con salt aleatorio. Sin dependencias externas."""
+    salt = secrets.token_hex(16)
+    dk = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt.encode("utf-8"), 260000)
+    return f"pbkdf2:{salt}:{dk.hex()}"
+
+
+def verify_password(password: str, hashed: str) -> bool:
+    try:
+        _, salt, stored = hashed.split(":")
+        dk = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt.encode("utf-8"), 260000)
+        return secrets.compare_digest(dk.hex(), stored)
+    except Exception:
+        return False
+
+
+async def crear_agente(agente_id: str, nombre: str, password: str, rol: str = "agente") -> bool:
+    """Crea un agente si no existe. Retorna True si fue creado, False si ya existía."""
+    async with get_session()() as session:
+        result = await session.execute(select(Agente).where(Agente.id == agente_id))
+        if result.scalar_one_or_none():
+            return False
+        session.add(Agente(
+            id=agente_id,
+            nombre=nombre,
+            password_hash=hash_password(password),
+            rol=rol,
+            enabled=True,
+            created_at=datetime.utcnow(),
+        ))
+        await session.commit()
+        return True
+
+
+async def validar_credenciales(username: str, password: str) -> "Agente | None":
+    """Valida usuario y contraseña. Retorna el objeto Agente o None."""
+    async with get_session()() as session:
+        result = await session.execute(
+            select(Agente).where(Agente.id == username, Agente.enabled == True)
+        )
+        agente = result.scalar_one_or_none()
+        if agente and verify_password(password, agente.password_hash):
+            return agente
+        return None
+
+
+async def crear_sesion(agente_id: str, agente_nombre: str) -> tuple[str, datetime]:
+    """Crea una sesión de 24 horas. Limpia sesiones expiradas del mismo agente."""
+    token = str(uuid.uuid4())
+    expires_at = datetime.utcnow() + timedelta(hours=24)
+    async with get_session()() as session:
+        # Limpiar sesiones expiradas del agente
+        result = await session.execute(
+            select(AgenteSesion).where(
+                AgenteSesion.agente_id == agente_id,
+                AgenteSesion.expires_at < datetime.utcnow(),
+            )
+        )
+        for s in result.scalars().all():
+            await session.delete(s)
+        session.add(AgenteSesion(
+            token=token,
+            agente_id=agente_id,
+            agente_nombre=agente_nombre,
+            created_at=datetime.utcnow(),
+            expires_at=expires_at,
+        ))
+        await session.commit()
+    return token, expires_at
+
+
+async def validar_token(token: str) -> "Agente | None":
+    """Valida un token de sesión. Retorna el Agente o None si expiró/inválido."""
+    async with get_session()() as session:
+        result = await session.execute(
+            select(AgenteSesion).where(
+                AgenteSesion.token == token,
+                AgenteSesion.expires_at > datetime.utcnow(),
+            )
+        )
+        sesion = result.scalar_one_or_none()
+        if not sesion:
+            return None
+        agente_result = await session.execute(
+            select(Agente).where(Agente.id == sesion.agente_id, Agente.enabled == True)
+        )
+        return agente_result.scalar_one_or_none()
+
+
+async def invalidar_sesion(token: str) -> None:
+    """Elimina un token de sesión (logout)."""
+    async with get_session()() as session:
+        result = await session.execute(
+            select(AgenteSesion).where(AgenteSesion.token == token)
+        )
+        sesion = result.scalar_one_or_none()
+        if sesion:
+            await session.delete(sesion)
+            await session.commit()
+
+
+async def cambiar_password(agente_id: str, nuevo_password: str) -> bool:
+    """Cambia el password de un agente. Retorna False si no existe."""
+    async with get_session()() as session:
+        result = await session.execute(select(Agente).where(Agente.id == agente_id))
+        agente = result.scalar_one_or_none()
+        if not agente:
+            return False
+        agente.password_hash = hash_password(nuevo_password)
+        await session.commit()
+        return True
