@@ -815,6 +815,8 @@ async def admin_finalizar(telefono: str, agente: dict = Depends(_get_agente)):
             registro.assigned_agent = None
             registro.resolved_at = ahora
             registro.updated_at = ahora
+            registro.notification_sent = False
+            registro.notification_sent_at = None
         else:
             session.add(ConversacionModo(
                 telefono=telefono,

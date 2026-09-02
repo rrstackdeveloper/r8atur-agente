@@ -203,6 +203,11 @@ async def establecer_handoff(
                 registro.assigned_agent = assigned_agent  # type: ignore[assignment]
             if handoff_summary is not _UNSET:
                 registro.handoff_summary = handoff_summary  # type: ignore[assignment]
+            # Al cerrar o devolver la conversación, resetear notificación para
+            # que un próximo handoff del mismo cliente sí notifique a los agentes.
+            if handoff_status in ("BOT_ACTIVE", "RESOLVED"):
+                registro.notification_sent = False
+                registro.notification_sent_at = None
             registro.updated_at = datetime.utcnow()
         else:
             session.add(ConversacionModo(
