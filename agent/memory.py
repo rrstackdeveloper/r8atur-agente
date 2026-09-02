@@ -94,23 +94,27 @@ class ConversacionModo(Base):
 
 
 async def inicializar_db():
+    # Crear tablas en su propia transacción (aislada de las migraciones)
     async with get_engine().begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-        # Migraciones para columnas nuevas (no falla si ya existen)
-        for sql in [
-            "ALTER TABLE conversacion_modo ADD COLUMN handoff_status VARCHAR(30) DEFAULT 'BOT_ACTIVE'",
-            "ALTER TABLE conversacion_modo ADD COLUMN assigned_agent VARCHAR(100)",
-            "ALTER TABLE conversacion_modo ADD COLUMN handoff_summary TEXT",
-            "ALTER TABLE conversacion_modo ADD COLUMN handoff_priority VARCHAR(20) DEFAULT 'NORMAL'",
-            "ALTER TABLE conversacion_modo ADD COLUMN notification_sent BOOLEAN DEFAULT 0",
-            "ALTER TABLE conversacion_modo ADD COLUMN notification_sent_at DATETIME",
-            "ALTER TABLE conversacion_modo ADD COLUMN claimed_at DATETIME",
-            "ALTER TABLE conversacion_modo ADD COLUMN resolved_at DATETIME",
-        ]:
-            try:
+
+    # Cada migración en su propia transacción — si falla (columna ya existe) no
+    # afecta a las demás ni revierte el CREATE TABLE anterior. Crítico en PostgreSQL.
+    for sql in [
+        "ALTER TABLE conversacion_modo ADD COLUMN handoff_status VARCHAR(30) DEFAULT 'BOT_ACTIVE'",
+        "ALTER TABLE conversacion_modo ADD COLUMN assigned_agent VARCHAR(100)",
+        "ALTER TABLE conversacion_modo ADD COLUMN handoff_summary TEXT",
+        "ALTER TABLE conversacion_modo ADD COLUMN handoff_priority VARCHAR(20) DEFAULT 'NORMAL'",
+        "ALTER TABLE conversacion_modo ADD COLUMN notification_sent BOOLEAN DEFAULT 0",
+        "ALTER TABLE conversacion_modo ADD COLUMN notification_sent_at DATETIME",
+        "ALTER TABLE conversacion_modo ADD COLUMN claimed_at DATETIME",
+        "ALTER TABLE conversacion_modo ADD COLUMN resolved_at DATETIME",
+    ]:
+        try:
+            async with get_engine().begin() as conn:
                 await conn.execute(text(sql))
-            except Exception:
-                pass
+        except Exception:
+            pass
 
 
 async def guardar_mensaje(telefono: str, role: str, content: str):
