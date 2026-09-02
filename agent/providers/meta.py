@@ -79,3 +79,52 @@ class ProveedorMeta(ProveedorWhatsApp):
             if r.status_code != 200:
                 logger.error(f"Error Meta API: {r.status_code} — {r.text}")
             return r.status_code == 200
+
+    async def enviar_plantilla_handoff(
+        self,
+        telefono: str,
+        cliente: str,
+        servicio: str,
+        motivo: str,
+        prioridad: str,
+        resumen: str,
+        link: str,
+    ) -> bool:
+        """
+        Envía notificación de handoff usando la plantilla aprobada 'handoff_agente'.
+        Necesaria para contactar números que no iniciaron conversación en las últimas 24h.
+        """
+        if not self.access_token or not self.phone_number_id:
+            return False
+        url = f"https://graph.facebook.com/{self.api_version}/{self.phone_number_id}/messages"
+        headers = {
+            "Authorization": f"Bearer {self.access_token}",
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "messaging_product": "whatsapp",
+            "to": telefono,
+            "type": "template",
+            "template": {
+                "name": "handoff_agente",
+                "language": {"code": "es"},
+                "components": [
+                    {
+                        "type": "body",
+                        "parameters": [
+                            {"type": "text", "text": cliente},
+                            {"type": "text", "text": servicio},
+                            {"type": "text", "text": motivo},
+                            {"type": "text", "text": prioridad},
+                            {"type": "text", "text": resumen[:400]},
+                            {"type": "text", "text": link},
+                        ],
+                    }
+                ],
+            },
+        }
+        async with httpx.AsyncClient() as client:
+            r = await client.post(url, json=payload, headers=headers)
+            if r.status_code != 200:
+                logger.error(f"Error plantilla handoff_agente: {r.status_code} — {r.text}")
+            return r.status_code == 200

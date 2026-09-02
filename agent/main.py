@@ -166,25 +166,30 @@ async def notificar_agentes(telefono: str, resumen: dict):
 
     notificacion_exitosa = False
     for agent_phone in phones_agentes:
-        if agent_phone and proveedor:
-            try:
-                ok = await proveedor.enviar_mensaje(agent_phone, notif)
-                if ok:
-                    notificacion_exitosa = True
-                    logger.info(f"Notificación enviada a agente {agent_phone}: ok")
-                else:
-                    # Meta puede rechazar por requerir template aprobado
-                    logger.error(
-                        f"Error enviando notificación a {agent_phone} — "
-                        f"WHATSAPP_AGENT_NOTIFICATION_TEMPLATE_REQUIRED: "
-                        f"Meta puede requerir un template aprobado para mensajes iniciados por el negocio. "
-                        f"Ver: https://developers.facebook.com/docs/whatsapp/message-templates"
-                    )
-            except Exception as exc:
-                logger.error(
-                    f"Excepción enviando notificación a {agent_phone} — "
-                    f"WHATSAPP_AGENT_NOTIFICATION_TEMPLATE_REQUIRED: {exc}"
+        if not agent_phone or not proveedor:
+            continue
+        try:
+            # Usar plantilla aprobada si el proveedor es Meta
+            from agent.providers.meta import ProveedorMeta
+            if isinstance(proveedor, ProveedorMeta):
+                ok = await proveedor.enviar_plantilla_handoff(
+                    telefono=agent_phone,
+                    cliente=telefono,
+                    servicio=servicio,
+                    motivo=motivo,
+                    prioridad=prioridad_display,
+                    resumen=resumen_texto,
+                    link=link,
                 )
+            else:
+                ok = await proveedor.enviar_mensaje(agent_phone, notif)
+            if ok:
+                notificacion_exitosa = True
+                logger.info(f"Notificación enviada a agente {agent_phone}: ok")
+            else:
+                logger.error(f"Error enviando notificación a {agent_phone}")
+        except Exception as exc:
+            logger.error(f"Excepción enviando notificación a {agent_phone}: {exc}")
 
     if notificacion_exitosa:
         await marcar_notificacion_enviada(telefono)
