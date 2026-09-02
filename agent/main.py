@@ -432,7 +432,7 @@ header h1{font-size:1.1rem}
   </div>
 </div>
 <script>
-let key=null,agentName='',phone=null,handoffStatus='BOT_ACTIVE',assignedAgent=null,handoffPriority='NORMAL',timer=null;
+let key=null,agentName='',phone=null,handoffStatus='BOT_ACTIVE',assignedAgent=null,handoffPriority='NORMAL',timer=null,lastMsgTs=null;
 
 function apiH(){return{'X-Agent-Token':key,'Content-Type':'application/json'};}
 function apiHGet(){return{'X-Agent-Token':key};}
@@ -467,7 +467,7 @@ async function logout(){
     try{await fetch('/admin/auth/logout',{method:'POST',headers:{'X-Agent-Token':key}});}catch(_){}
   }
   localStorage.removeItem('ak');localStorage.removeItem('agentName');
-  key=null;phone=null;clearInterval(timer);
+  key=null;phone=null;lastMsgTs=null;clearInterval(timer);
   document.getElementById('app').style.display='none';
   document.getElementById('login').style.display='flex';
 }
@@ -477,7 +477,7 @@ function showApp(){
   document.getElementById('app').style.display='flex';
   document.getElementById('agent-display').textContent='👤 '+agentName;
   loadConvs();
-  timer=setInterval(refresh,5000);
+  timer=setInterval(refresh,10000);
   const p=new URLSearchParams(window.location.search).get('conv');
   if(p){setTimeout(()=>selectConvByPhone(p),800);}
 }
@@ -504,10 +504,7 @@ function _sortConvs(data){
   });
 }
 
-async function loadConvs(){
-  const r=await fetch('/admin/api/conversaciones',{headers:apiHGet()});
-  if(!r.ok){logout();return;}
-  const rawData=await r.json();
+function renderConvs(rawData){
   const data=_sortConvs(rawData);
   const c=document.getElementById('conv-items');
   if(!data.length){c.innerHTML='<p style="padding:1rem;color:#999;font-size:.85rem">Sin conversaciones aún</p>';return;}
@@ -525,17 +522,23 @@ async function loadConvs(){
   }).join('');
 }
 
+async function loadConvs(){
+  const r=await fetch('/admin/api/conversaciones',{headers:apiHGet()});
+  if(!r.ok){logout();return;}
+  renderConvs(await r.json());
+}
+
 async function selectConv(t,hs,aa,hp){
   phone=t;
   handoffStatus=hs||'BOT_ACTIVE';
   assignedAgent=aa||null;
   handoffPriority=hp||'NORMAL';
+  lastMsgTs=null; // forzar carga del historial en el próximo refresh
   document.getElementById('empty-state').style.display='none';
   document.getElementById('chat-content').style.display='flex';
   document.getElementById('chat-phone').textContent=t;
   updateStatusUI();
   await loadChat();
-  await loadConvs();
 }
 
 async function selectConvByPhone(p){
@@ -663,22 +666,26 @@ function updateStatusUI(){
 }
 
 async function refresh(){
-  if(!phone){await loadConvs();return;}
+  // Una sola llamada por ciclo — los datos se reutilizan para lista y chat
   const r=await fetch('/admin/api/conversaciones',{headers:apiHGet()});
   if(!r.ok){logout();return;}
   const data=await r.json();
+  renderConvs(data);
+  if(!phone)return;
   const conv=data.find(d=>d.telefono===phone);
-  if(conv){
-    const newStatus=conv.handoff_status||'BOT_ACTIVE';
-    const newAgent=conv.assigned_agent||null;
-    const newPriority=conv.handoff_priority||'NORMAL';
-    if(newStatus!==handoffStatus||newAgent!==assignedAgent){
-      handoffStatus=newStatus;assignedAgent=newAgent;handoffPriority=newPriority;
-      updateStatusUI();
-    }
+  if(!conv)return;
+  const newStatus=conv.handoff_status||'BOT_ACTIVE';
+  const newAgent=conv.assigned_agent||null;
+  const newPriority=conv.handoff_priority||'NORMAL';
+  if(newStatus!==handoffStatus||newAgent!==assignedAgent){
+    handoffStatus=newStatus;assignedAgent=newAgent;handoffPriority=newPriority;
+    updateStatusUI();
   }
-  await loadConvs();
-  await loadChat();
+  // Recargar historial solo si llegó un mensaje nuevo
+  if(conv.ultimo_mensaje!==lastMsgTs){
+    lastMsgTs=conv.ultimo_mensaje;
+    await loadChat();
+  }
 }
 
 function fmtStatus(s,p){
