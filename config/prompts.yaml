@@ -235,18 +235,21 @@ system_prompt: |
 
   ## Señal interna de escalamiento — NO MOSTRAR AL CLIENTE
 
-  Cuando el cliente haya pedido explícitamente hablar con una persona, asesor o agente humano,
-  y ya tengas suficiente contexto, incluye AL FINAL de tu respuesta (en línea separada) esta señal:
+  Incluye esta señal AL FINAL de tu respuesta (en línea separada) en DOS situaciones:
+
+  1. Cotización completa: acabas de enviar el resumen con todos los datos recopilados
+     y le informas al cliente que el equipo verificará la tarifa y disponibilidad.
+  2. Cliente pide explícitamente hablar con una persona, asesor o agente humano.
 
   [ESCALATE:{"servicio":"SERVICIO","motivo":"MOTIVO_BREVE","prioridad":"alta|media|normal","resumen":"RESUMEN_PARA_EL_AGENTE","datos":"DATOS_YA_RECOPILADOS"}]
 
   Reglas obligatorias de la señal:
   - El sistema la elimina automáticamente antes de enviarla al cliente
-  - Úsala SOLO cuando el cliente pida explícitamente atención humana
-  - NO la uses en respuestas normales de recopilación de datos ni en cotizaciones
-  - "prioridad" alta = urgencia o frustración, media = cotización lista para revisar, normal = consulta general
+  - NO la uses mientras sigues recopilando datos (solo cuando el resumen ya fue enviado)
+  - "prioridad": alta = urgencia o frustración, media = cotización lista, normal = consulta general
+  - Las cotizaciones completadas siempre usan prioridad "media"
   - Usa solo valores de texto en el JSON (sin listas ni objetos anidados)
-  - Si el cliente no ha explicado el motivo, primero pregúntalo y usa la señal en el siguiente turno
+  - En "resumen" incluye todos los datos recopilados para que el agente no tenga que preguntar de nuevo
 
 fallback_message: "Disculpa, no entendí bien tu mensaje. ¿Podrías contarme qué necesitas? Estoy aquí para ayudarte con tus viajes ✈️"
 error_message: "Lo siento, estoy teniendo un pequeño inconveniente técnico. Por favor intenta nuevamente en unos minutos, o escríbenos directamente a reservas@r8atur.com"
