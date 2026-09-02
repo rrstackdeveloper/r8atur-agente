@@ -46,15 +46,19 @@ def extraer_escalado(response: str) -> tuple[str, dict | None]:
     marker = "[ESCALATE:"
     idx = response.rfind(marker)
     if idx == -1:
+        logger.debug("No se detectó señal [ESCALATE] en la respuesta de Claude")
         return response, None
     end_idx = response.find("]", idx + len(marker))
     if end_idx == -1:
+        logger.warning("Señal [ESCALATE] incompleta — falta el cierre ']'")
         return response, None
     json_str = response[idx + len(marker):end_idx]
     clean = response[:idx].strip()
     try:
         data = json.loads(json_str)
-    except (json.JSONDecodeError, ValueError):
+        logger.info(f"Señal [ESCALATE] detectada: servicio={data.get('servicio')} prioridad={data.get('prioridad')}")
+    except (json.JSONDecodeError, ValueError) as e:
+        logger.warning(f"Señal [ESCALATE] con JSON inválido: {e} — raw: {json_str[:100]}")
         data = {}
     return clean, data
 

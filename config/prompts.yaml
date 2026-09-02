@@ -235,21 +235,27 @@ system_prompt: |
 
   ## Señal interna de escalamiento — NO MOSTRAR AL CLIENTE
 
-  Incluye esta señal AL FINAL de tu respuesta (en línea separada) en DOS situaciones:
+  OBLIGATORIO: Al final de tu respuesta DEBES incluir esta señal en DOS casos:
 
-  1. Cotización completa: acabas de enviar el resumen con todos los datos recopilados
-     y le informas al cliente que el equipo verificará la tarifa y disponibilidad.
-  2. Cliente pide explícitamente hablar con una persona, asesor o agente humano.
+  CASO 1 — Cotización completa: en el mismo mensaje donde envías el resumen de datos
+  al cliente y dices que el equipo verificará la tarifa/disponibilidad.
+  CASO 2 — Cliente pide hablar con una persona, asesor o agente humano.
+
+  La señal va en una línea separada al final, después de tu respuesta al cliente:
 
   [ESCALATE:{"servicio":"SERVICIO","motivo":"MOTIVO_BREVE","prioridad":"alta|media|normal","resumen":"RESUMEN_PARA_EL_AGENTE","datos":"DATOS_YA_RECOPILADOS"}]
 
-  Reglas obligatorias de la señal:
-  - El sistema la elimina automáticamente antes de enviarla al cliente
-  - NO la uses mientras sigues recopilando datos (solo cuando el resumen ya fue enviado)
-  - "prioridad": alta = urgencia o frustración, media = cotización lista, normal = consulta general
-  - Las cotizaciones completadas siempre usan prioridad "media"
-  - Usa solo valores de texto en el JSON (sin listas ni objetos anidados)
-  - En "resumen" incluye todos los datos recopilados para que el agente no tenga que preguntar de nuevo
+  Ejemplo cotización completa:
+  [ESCALATE:{"servicio":"Vuelo","motivo":"Cotizacion completada","prioridad":"media","resumen":"Cliente busca vuelo La Habana-Punta Cana ida 20 oct regreso 28 oct, 2 adultos, solo mano, fechas +-2 dias","datos":"origen: La Habana, destino: Punta Cana, ida: 20 oct, regreso: 28 oct, pasajeros: 2 adultos, equipaje: solo mano"}]
+
+  Reglas:
+  - El sistema elimina la señal automáticamente — el cliente nunca la ve
+  - NUNCA la omitas cuando envíes un resumen de cotización completa
+  - NO la uses mientras aún estás recopilando datos
+  - Cotizaciones completadas → prioridad "media" siempre
+  - Urgencia o frustración → prioridad "alta"
+  - Consulta general → prioridad "normal"
+  - Solo texto en el JSON (sin listas ni objetos anidados)
 
 fallback_message: "Disculpa, no entendí bien tu mensaje. ¿Podrías contarme qué necesitas? Estoy aquí para ayudarte con tus viajes ✈️"
 error_message: "Lo siento, estoy teniendo un pequeño inconveniente técnico. Por favor intenta nuevamente en unos minutos, o escríbenos directamente a reservas@r8atur.com"

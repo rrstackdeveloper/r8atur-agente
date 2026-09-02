@@ -248,11 +248,12 @@ async def webhook_handler(request: Request):
             await proveedor.enviar_mensaje(msg.telefono, respuesta)
 
             if escalado is not None:
-                # Verificar si ya existe un handoff activo (evitar duplicados)
+                # Bloquear solo si hay un agente activo o ya está esperando atención.
+                # RESOLVED y BOT_ACTIVE permiten crear un nuevo handoff.
                 status_actual = await obtener_handoff_status(msg.telefono)
                 if status_actual in ("WAITING_HUMAN", "HUMAN_ACTIVE"):
                     logger.info(
-                        f"Handoff ya existe para {msg.telefono} (status={status_actual}) — omitiendo duplicado"
+                        f"Handoff ya activo para {msg.telefono} (status={status_actual}) — omitiendo duplicado"
                     )
                 else:
                     prioridad_raw = escalado.get("prioridad", "normal")
