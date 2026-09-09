@@ -624,7 +624,8 @@ async function tomarConv(){
   });
   if(r.status===409){
     const data=await r.json();
-    alert('Esta conversación ya fue tomada por '+( data.assigned_agent||'otro agente'));
+    const aa=(data.detail&&data.detail.assigned_agent)||'otro agente';
+    alert('Esta conversación ya fue tomada por '+aa);
     await refresh();return;
   }
   handoffStatus='HUMAN_ACTIVE';

@@ -225,28 +225,53 @@ async def establecer_handoff(
 async def atomic_claim_conversation(telefono: str, agent_name: str) -> dict:
     """
     Reclama atómicamente una conversación para un agente.
-    Solo tiene éxito si el estado actual es WAITING_HUMAN o BOT_ACTIVE.
+    Tiene éxito si el estado es WAITING_HUMAN, BOT_ACTIVE, RESOLVED,
+    o si no existe registro (conversación nueva — equivale a BOT_ACTIVE).
     Retorna {"success": True} o {"success": False, "reason": "ya_tomada"}.
     """
+    now = datetime.utcnow()
     async with get_session()() as session:
+        # Intentar UPDATE sobre estados tomables
         result = await session.execute(
             update(ConversacionModo)
             .where(
                 ConversacionModo.telefono == telefono,
-                ConversacionModo.handoff_status.in_(["WAITING_HUMAN", "BOT_ACTIVE"])
+                ConversacionModo.handoff_status.in_(["WAITING_HUMAN", "BOT_ACTIVE", "RESOLVED"])
             )
             .values(
                 modo="humano",
                 handoff_status="HUMAN_ACTIVE",
                 assigned_agent=agent_name,
-                claimed_at=datetime.utcnow(),
-                updated_at=datetime.utcnow(),
+                claimed_at=now,
+                updated_at=now,
             )
         )
         await session.commit()
-        if result.rowcount == 0:
-            return {"success": False, "reason": "ya_tomada"}
-        return {"success": True}
+
+        if result.rowcount > 0:
+            return {"success": True}
+
+        # rowcount=0: el registro no existe (nuevo) o ya está HUMAN_ACTIVE
+        check = await session.execute(
+            select(ConversacionModo).where(ConversacionModo.telefono == telefono)
+        )
+        registro = check.scalar_one_or_none()
+
+        if registro is None:
+            # Conversación nueva sin fila en BD — crear directamente como HUMAN_ACTIVE
+            session.add(ConversacionModo(
+                telefono=telefono,
+                modo="humano",
+                handoff_status="HUMAN_ACTIVE",
+                assigned_agent=agent_name,
+                claimed_at=now,
+                updated_at=now,
+            ))
+            await session.commit()
+            return {"success": True}
+
+        # Existe pero en HUMAN_ACTIVE → ya tomada por otro agente
+        return {"success": False, "reason": "ya_tomada"}
 
 
 async def marcar_notificacion_enviada(telefono: str):
