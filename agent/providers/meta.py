@@ -35,6 +35,11 @@ class ProveedorMeta(ProveedorWhatsApp):
         for entry in body.get("entry", []):
             for change in entry.get("changes", []):
                 value = change.get("value", {})
+                # Mapear wa_id → nombre de perfil desde el array contacts
+                nombres = {
+                    c.get("wa_id", ""): c.get("profile", {}).get("name")
+                    for c in value.get("contacts", [])
+                }
                 for msg in value.get("messages", []):
                     tipo = msg.get("type")
                     if tipo == "text":
@@ -56,6 +61,7 @@ class ProveedorMeta(ProveedorWhatsApp):
                         telefono=telefono,
                         texto=texto,
                         mensaje_id=msg.get("id", ""),
+                        nombre_perfil=nombres.get(raw_phone),
                         es_propio=False,
                     ))
         return mensajes

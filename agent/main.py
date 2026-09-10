@@ -17,7 +17,7 @@ from agent.memory import (
     obtener_handoff_status, listar_conversaciones, obtener_historial_completo,
     atomic_claim_conversation, marcar_notificacion_enviada, obtener_registro_completo,
     validar_token, validar_credenciales, crear_sesion, invalidar_sesion,
-    crear_agente, cambiar_password,
+    crear_agente, cambiar_password, actualizar_nombre_perfil,
 )
 from agent.providers import obtener_proveedor
 from agent.providers.base import ProveedorWhatsApp
@@ -230,6 +230,10 @@ async def webhook_handler(request: Request):
 
             logger.info(f"Mensaje de {msg.telefono}: {msg.texto}")
 
+            # Actualizar nombre de perfil si viene en el payload
+            if msg.nombre_perfil:
+                await actualizar_nombre_perfil(msg.telefono, msg.nombre_perfil)
+
             # HUMAN_ACTIVE: agente tomó la conversación → Naylan silenciada
             modo = await obtener_modo(msg.telefono)
             if modo == "humano":
@@ -375,7 +379,8 @@ header h1{font-size:1.1rem}
 .conv-item{padding:.85rem 1rem;cursor:pointer;border-bottom:1px solid #f0f2f5;transition:background .15s}
 .conv-item:hover{background:#f7f8fa}
 .conv-item.active{background:#e6f3f2;border-left:3px solid #128C7E}
-.conv-phone{font-weight:600;font-size:.88rem;color:#1a202c}
+.conv-nombre{font-weight:700;font-size:.9rem;color:#1a202c}
+.conv-phone{font-weight:400;font-size:.78rem;color:#718096}
 .conv-meta{display:flex;align-items:center;gap:.4rem;margin-top:.3rem;flex-wrap:wrap}
 .conv-time{font-size:.7rem;color:#999}
 .badge{font-size:.65rem;padding:.2rem .55rem;border-radius:10px;font-weight:700;text-transform:uppercase;white-space:nowrap}
@@ -467,7 +472,7 @@ header h1{font-size:1.1rem}
   </div>
 </div>
 <script>
-let key=null,agentName='',phone=null,handoffStatus='BOT_ACTIVE',assignedAgent=null,handoffPriority='NORMAL',timer=null,lastMsgTs=null;
+let key=null,agentName='',phone=null,handoffStatus='BOT_ACTIVE',assignedAgent=null,handoffPriority='NORMAL',timer=null,lastMsgTs=null,clienteNombre=null;
 
 function apiH(){return{'X-Agent-Token':key,'Content-Type':'application/json'};}
 function apiHGet(){return{'X-Agent-Token':key};}
@@ -547,7 +552,9 @@ function renderConvs(rawData){
     const hs=d.handoff_status||'BOT_ACTIVE';
     const hp=d.handoff_priority||'NORMAL';
     const isCritical=hs==='WAITING_HUMAN'&&hp==='CRITICAL';
-    return `<div class="conv-item ${d.telefono===phone?'active':''}" onclick="selectConv('${d.telefono}','${hs}','${d.assigned_agent||''}','${hp}')">
+    const nombre=d.nombre_perfil?`<div class="conv-nombre">${esc(d.nombre_perfil)}</div>`:'';
+    return `<div class="conv-item ${d.telefono===phone?'active':''}" onclick="selectConv('${d.telefono}','${hs}','${d.assigned_agent||''}','${hp}','${esc(d.nombre_perfil||'')}')">
+      ${nombre}
       <div class="conv-phone">${d.telefono}</div>
       <div class="conv-meta">
         <span class="badge badge-${hs}${isCritical?' critical':''}">${fmtStatus(hs,hp)}</span>
@@ -563,15 +570,17 @@ async function loadConvs(){
   renderConvs(await r.json());
 }
 
-async function selectConv(t,hs,aa,hp){
+async function selectConv(t,hs,aa,hp,nombre){
   phone=t;
   handoffStatus=hs||'BOT_ACTIVE';
   assignedAgent=aa||null;
   handoffPriority=hp||'NORMAL';
-  lastMsgTs=null; // forzar carga del historial en el próximo refresh
+  clienteNombre=nombre||null;
+  lastMsgTs=null;
   document.getElementById('empty-state').style.display='none';
   document.getElementById('chat-content').style.display='flex';
-  document.getElementById('chat-phone').textContent=t;
+  document.getElementById('chat-phone').textContent=clienteNombre||t;
+  document.getElementById('chat-count').textContent=clienteNombre?t:'';
   updateStatusUI();
   await loadChat();
 }
@@ -581,7 +590,7 @@ async function selectConvByPhone(p){
   if(!r.ok)return;
   const data=await r.json();
   const conv=data.find(d=>d.telefono===p||d.telefono===p.replace('+',''));
-  if(conv)await selectConv(conv.telefono,conv.handoff_status||'BOT_ACTIVE',conv.assigned_agent||'',conv.handoff_priority||'NORMAL');
+  if(conv)await selectConv(conv.telefono,conv.handoff_status||'BOT_ACTIVE',conv.assigned_agent||'',conv.handoff_priority||'NORMAL',conv.nombre_perfil||'');
 }
 
 async function loadChat(){
@@ -596,7 +605,12 @@ async function loadChat(){
     <div class="msg-time ${m.role==='user'?'msg-time-right':''}">${m.role==='user'?'👤 Cliente':'🤖 Naylan'} · ${fmtTime(m.timestamp)}</div>
   </div>`).join('');
   if(atBot)el.scrollTop=el.scrollHeight;
-  document.getElementById('chat-count').textContent=msgs.length+' mensajes';
+  const countEl=document.getElementById('chat-count');
+  if(clienteNombre){
+    countEl.textContent=phone+' · '+msgs.length+' mensajes';
+  } else {
+    countEl.textContent=msgs.length+' mensajes';
+  }
 }
 
 async function sendMsg(){
@@ -713,9 +727,15 @@ async function refresh(){
   const newStatus=conv.handoff_status||'BOT_ACTIVE';
   const newAgent=conv.assigned_agent||null;
   const newPriority=conv.handoff_priority||'NORMAL';
+  const newNombre=conv.nombre_perfil||null;
   if(newStatus!==handoffStatus||newAgent!==assignedAgent){
     handoffStatus=newStatus;assignedAgent=newAgent;handoffPriority=newPriority;
     updateStatusUI();
+  }
+  if(newNombre&&newNombre!==clienteNombre){
+    clienteNombre=newNombre;
+    document.getElementById('chat-phone').textContent=newNombre;
+    document.getElementById('chat-count').textContent=phone;
   }
   // Recargar historial solo si llegó un mensaje nuevo
   if(conv.ultimo_mensaje!==lastMsgTs){

@@ -86,6 +86,7 @@ class ConversacionModo(Base):
     assigned_agent: Mapped[str | None] = mapped_column(String(100), nullable=True)
     handoff_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     handoff_priority: Mapped[str] = mapped_column(String(20), default="NORMAL")  # NORMAL|HIGH|CRITICAL
+    nombre_perfil: Mapped[str | None] = mapped_column(String(200), nullable=True)
     notification_sent: Mapped[bool] = mapped_column(Boolean, default=False)
     notification_sent_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     claimed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
@@ -110,6 +111,7 @@ async def inicializar_db():
         "ALTER TABLE conversacion_modo ADD COLUMN IF NOT EXISTS notification_sent_at TIMESTAMP",
         "ALTER TABLE conversacion_modo ADD COLUMN IF NOT EXISTS claimed_at TIMESTAMP",
         "ALTER TABLE conversacion_modo ADD COLUMN IF NOT EXISTS resolved_at TIMESTAMP",
+        "ALTER TABLE conversacion_modo ADD COLUMN IF NOT EXISTS nombre_perfil VARCHAR(200)",
     ]:
         try:
             async with get_engine().begin() as conn:
@@ -131,6 +133,27 @@ async def inicializar_db():
                 await conn.execute(text(sql))
         except Exception:
             pass
+
+
+async def actualizar_nombre_perfil(telefono: str, nombre: str | None):
+    """Guarda o actualiza el nombre de perfil de WhatsApp del cliente."""
+    if not nombre:
+        return
+    async with get_session()() as session:
+        result = await session.execute(
+            select(ConversacionModo).where(ConversacionModo.telefono == telefono)
+        )
+        registro = result.scalar_one_or_none()
+        if registro:
+            registro.nombre_perfil = nombre
+            registro.updated_at = datetime.utcnow()
+        else:
+            session.add(ConversacionModo(
+                telefono=telefono,
+                nombre_perfil=nombre,
+                updated_at=datetime.utcnow(),
+            ))
+        await session.commit()
 
 
 async def guardar_mensaje(telefono: str, role: str, content: str):
@@ -361,6 +384,7 @@ async def listar_conversaciones() -> list[dict]:
                 "handoff_status": estados[row.telefono].handoff_status if row.telefono in estados else "BOT_ACTIVE",
                 "handoff_priority": estados[row.telefono].handoff_priority if row.telefono in estados else "NORMAL",
                 "assigned_agent": estados[row.telefono].assigned_agent if row.telefono in estados else None,
+                "nombre_perfil": estados[row.telefono].nombre_perfil if row.telefono in estados else None,
             }
             for row in rows
         ]

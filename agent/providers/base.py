@@ -11,6 +11,7 @@ class MensajeEntrante:
     texto: str
     mensaje_id: str
     es_propio: bool
+    nombre_perfil: str | None = None
 
 
 class ProveedorWhatsApp(ABC):
