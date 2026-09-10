@@ -50,8 +50,10 @@ class ProveedorMeta(ProveedorWhatsApp):
                         logger.info(f"Audio transcrito: {texto}")
                     else:
                         continue
+                    raw_phone = msg.get("from", "")
+                    telefono = raw_phone if raw_phone.startswith("+") else f"+{raw_phone}"
                     mensajes.append(MensajeEntrante(
-                        telefono=msg.get("from", ""),
+                        telefono=telefono,
                         texto=texto,
                         mensaje_id=msg.get("id", ""),
                         es_propio=False,

@@ -117,6 +117,21 @@ async def inicializar_db():
         except Exception:
             pass
 
+    # Normalización de teléfonos: unificar registros con y sin prefijo '+'
+    # 1. En conversacion_modo (PK=telefono): eliminar duplicados sin '+' donde ya existe con '+'
+    # 2. En conversacion_modo: agregar '+' a los restantes sin '+'
+    # 3. En mensajes: agregar '+' a todos los teléfonos sin '+'
+    for sql in [
+        "DELETE FROM conversacion_modo WHERE telefono NOT LIKE '+%' AND ('+' || telefono) IN (SELECT telefono FROM conversacion_modo WHERE telefono LIKE '+%')",
+        "UPDATE conversacion_modo SET telefono = '+' || telefono WHERE telefono NOT LIKE '+%' AND telefono != ''",
+        "UPDATE mensajes SET telefono = '+' || telefono WHERE telefono NOT LIKE '+%' AND telefono != ''",
+    ]:
+        try:
+            async with get_engine().begin() as conn:
+                await conn.execute(text(sql))
+        except Exception:
+            pass
+
 
 async def guardar_mensaje(telefono: str, role: str, content: str):
     async with get_session()() as session:
