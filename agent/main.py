@@ -477,7 +477,8 @@ header h1{font-size:1.1rem}
 </div>
 <script>
 let key=null,agentName='',phone=null,handoffStatus='BOT_ACTIVE',assignedAgent=null,handoffPriority='NORMAL',timer=null,lastMsgTs=null,clienteNombre=null;
-const lastKnownCount={};  // phone → total_mensajes cuando se vio por última vez
+const lastKnownCount={};   // phone → count cuando el agente abrió la conv (para badge)
+const lastNotifiedCount={}; // phone → count cuando se envió la última notificación (evita spam)
 let notifEnabled=false;
 
 function apiH(){return{'X-Agent-Token':key,'Content-Type':'application/json'};}
@@ -584,8 +585,11 @@ async function loadConvs(){
   const r=await fetch('/admin/api/conversaciones',{headers:apiHGet()});
   if(!r.ok){logout();return;}
   const data=await r.json();
-  // Inicializar contadores — no notificar mensajes ya existentes al abrir
-  data.forEach(d=>{if(!(d.telefono in lastKnownCount))lastKnownCount[d.telefono]=d.total_mensajes;});
+  // Al cargar por primera vez: marcar todo como visto y notificado (no spamear al abrir)
+  data.forEach(d=>{
+    if(!(d.telefono in lastKnownCount))lastKnownCount[d.telefono]=d.total_mensajes;
+    if(!(d.telefono in lastNotifiedCount))lastNotifiedCount[d.telefono]=d.total_mensajes;
+  });
   renderConvs(data);
 }
 
@@ -596,8 +600,8 @@ async function selectConv(t,hs,aa,hp,nombre,totalMsgs){
   handoffPriority=hp||'NORMAL';
   clienteNombre=nombre||null;
   lastMsgTs=null;
-  // Marcar como leída
-  if(totalMsgs!==undefined)lastKnownCount[t]=totalMsgs;
+  // Marcar como leída y resetear notificaciones
+  if(totalMsgs!==undefined){lastKnownCount[t]=totalMsgs;lastNotifiedCount[t]=totalMsgs;}
   document.getElementById('empty-state').style.display='none';
   document.getElementById('chat-content').style.display='flex';
   document.getElementById('chat-phone').textContent=clienteNombre||t;
@@ -740,17 +744,24 @@ async function refresh(){
   const r=await fetch('/admin/api/conversaciones',{headers:apiHGet()});
   if(!r.ok){logout();return;}
   const data=await r.json();
-  // Detectar mensajes nuevos en conversaciones no seleccionadas
+  // Detectar mensajes nuevos — incluyendo conversaciones nuevas que aparecen por primera vez
   data.forEach(conv=>{
-    const prev=lastKnownCount[conv.telefono];
-    if(prev!==undefined&&conv.total_mensajes>prev&&conv.telefono!==phone){
-      showBrowserNotif(conv);
+    if(conv.telefono===phone){
+      // Conversación activa: marcar como leída automáticamente
+      lastKnownCount[conv.telefono]=conv.total_mensajes;
+      lastNotifiedCount[conv.telefono]=conv.total_mensajes;
+      return;
     }
-    // Inicializar si es conversación nueva
-    if(!(conv.telefono in lastKnownCount))lastKnownCount[conv.telefono]=conv.total_mensajes;
+    const prevNotif=lastNotifiedCount[conv.telefono];
+    const esConyNueva=prevNotif===undefined; // no existía en la carga inicial
+    const hayMensajesNuevos=prevNotif!==undefined&&conv.total_mensajes>prevNotif;
+    if(esConyNueva||hayMensajesNuevos){
+      showBrowserNotif(conv);
+      lastNotifiedCount[conv.telefono]=conv.total_mensajes;
+      // Si es conversación nueva, el badge arranca desde 0 (todos los msgs son "nuevos")
+      if(esConyNueva)lastKnownCount[conv.telefono]=0;
+    }
   });
-  // Actualizar contador de conversación activa (marcarla como leída)
-  if(phone){const cur=data.find(d=>d.telefono===phone);if(cur)lastKnownCount[phone]=cur.total_mensajes;}
   renderConvs(data);
   // Actualizar título de pestaña con total de conversaciones no leídas
   const totalUnread=data.filter(d=>d.telefono!==phone&&(lastKnownCount[d.telefono]||0)<d.total_mensajes).length;
