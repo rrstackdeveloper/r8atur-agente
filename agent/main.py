@@ -381,6 +381,10 @@ header h1{font-size:1.1rem}
 .conv-item.active{background:#e6f3f2;border-left:3px solid #128C7E}
 .conv-nombre{font-weight:700;font-size:.9rem;color:#1a202c}
 .conv-phone{font-weight:400;font-size:.78rem;color:#718096}
+.conv-item{position:relative}
+.unread-badge{position:absolute;top:50%;right:.75rem;transform:translateY(-50%);background:#e53e3e;color:white;border-radius:50%;min-width:20px;height:20px;font-size:.7rem;font-weight:700;display:flex;align-items:center;justify-content:center;padding:0 4px}
+.conv-item.unread{background:#fffbeb}
+.conv-item.unread .conv-nombre,.conv-item.unread .conv-phone{font-weight:700}
 .conv-meta{display:flex;align-items:center;gap:.4rem;margin-top:.3rem;flex-wrap:wrap}
 .conv-time{font-size:.7rem;color:#999}
 .badge{font-size:.65rem;padding:.2rem .55rem;border-radius:10px;font-weight:700;text-transform:uppercase;white-space:nowrap}
@@ -473,6 +477,8 @@ header h1{font-size:1.1rem}
 </div>
 <script>
 let key=null,agentName='',phone=null,handoffStatus='BOT_ACTIVE',assignedAgent=null,handoffPriority='NORMAL',timer=null,lastMsgTs=null,clienteNombre=null;
+const lastKnownCount={};  // phone → total_mensajes cuando se vio por última vez
+let notifEnabled=false;
 
 function apiH(){return{'X-Agent-Token':key,'Content-Type':'application/json'};}
 function apiHGet(){return{'X-Agent-Token':key};}
@@ -520,6 +526,12 @@ function showApp(){
   timer=setInterval(refresh,10000);
   const p=new URLSearchParams(window.location.search).get('conv');
   if(p){setTimeout(()=>selectConvByPhone(p),800);}
+  // Solicitar permiso de notificaciones del navegador
+  if('Notification' in window && Notification.permission==='default'){
+    Notification.requestPermission().then(perm=>{notifEnabled=perm==='granted';});
+  } else {
+    notifEnabled='Notification' in window && Notification.permission==='granted';
+  }
 }
 
 function _sortConvs(data){
@@ -553,13 +565,17 @@ function renderConvs(rawData){
     const hp=d.handoff_priority||'NORMAL';
     const isCritical=hs==='WAITING_HUMAN'&&hp==='CRITICAL';
     const nombre=d.nombre_perfil?`<div class="conv-nombre">${esc(d.nombre_perfil)}</div>`:'';
-    return `<div class="conv-item ${d.telefono===phone?'active':''}" onclick="selectConv('${d.telefono}','${hs}','${d.assigned_agent||''}','${hp}','${esc(d.nombre_perfil||'')}')">
+    const unread=d.telefono!==phone&&(lastKnownCount[d.telefono]||0)<d.total_mensajes;
+    const unreadCount=unread?d.total_mensajes-(lastKnownCount[d.telefono]||0):0;
+    const badge=unread?`<span class="unread-badge">${unreadCount>99?'99+':unreadCount}</span>`:'';
+    return `<div class="conv-item ${d.telefono===phone?'active':''}${unread?' unread':''}" onclick="selectConv('${d.telefono}','${hs}','${d.assigned_agent||''}','${hp}','${esc(d.nombre_perfil||'')}',${d.total_mensajes})">
       ${nombre}
       <div class="conv-phone">${d.telefono}</div>
       <div class="conv-meta">
         <span class="badge badge-${hs}${isCritical?' critical':''}">${fmtStatus(hs,hp)}</span>
         <span class="conv-time">${fmtTime(d.ultimo_mensaje)}</span>
       </div>
+      ${badge}
     </div>`;
   }).join('');
 }
@@ -567,16 +583,21 @@ function renderConvs(rawData){
 async function loadConvs(){
   const r=await fetch('/admin/api/conversaciones',{headers:apiHGet()});
   if(!r.ok){logout();return;}
-  renderConvs(await r.json());
+  const data=await r.json();
+  // Inicializar contadores — no notificar mensajes ya existentes al abrir
+  data.forEach(d=>{if(!(d.telefono in lastKnownCount))lastKnownCount[d.telefono]=d.total_mensajes;});
+  renderConvs(data);
 }
 
-async function selectConv(t,hs,aa,hp,nombre){
+async function selectConv(t,hs,aa,hp,nombre,totalMsgs){
   phone=t;
   handoffStatus=hs||'BOT_ACTIVE';
   assignedAgent=aa||null;
   handoffPriority=hp||'NORMAL';
   clienteNombre=nombre||null;
   lastMsgTs=null;
+  // Marcar como leída
+  if(totalMsgs!==undefined)lastKnownCount[t]=totalMsgs;
   document.getElementById('empty-state').style.display='none';
   document.getElementById('chat-content').style.display='flex';
   document.getElementById('chat-phone').textContent=clienteNombre||t;
@@ -590,7 +611,7 @@ async function selectConvByPhone(p){
   if(!r.ok)return;
   const data=await r.json();
   const conv=data.find(d=>d.telefono===p||d.telefono===p.replace('+',''));
-  if(conv)await selectConv(conv.telefono,conv.handoff_status||'BOT_ACTIVE',conv.assigned_agent||'',conv.handoff_priority||'NORMAL',conv.nombre_perfil||'');
+  if(conv)await selectConv(conv.telefono,conv.handoff_status||'BOT_ACTIVE',conv.assigned_agent||'',conv.handoff_priority||'NORMAL',conv.nombre_perfil||'',conv.total_mensajes);
 }
 
 async function loadChat(){
@@ -716,11 +737,24 @@ function updateStatusUI(){
 }
 
 async function refresh(){
-  // Una sola llamada por ciclo — los datos se reutilizan para lista y chat
   const r=await fetch('/admin/api/conversaciones',{headers:apiHGet()});
   if(!r.ok){logout();return;}
   const data=await r.json();
+  // Detectar mensajes nuevos en conversaciones no seleccionadas
+  data.forEach(conv=>{
+    const prev=lastKnownCount[conv.telefono];
+    if(prev!==undefined&&conv.total_mensajes>prev&&conv.telefono!==phone){
+      showBrowserNotif(conv);
+    }
+    // Inicializar si es conversación nueva
+    if(!(conv.telefono in lastKnownCount))lastKnownCount[conv.telefono]=conv.total_mensajes;
+  });
+  // Actualizar contador de conversación activa (marcarla como leída)
+  if(phone){const cur=data.find(d=>d.telefono===phone);if(cur)lastKnownCount[phone]=cur.total_mensajes;}
   renderConvs(data);
+  // Actualizar título de pestaña con total de conversaciones no leídas
+  const totalUnread=data.filter(d=>d.telefono!==phone&&(lastKnownCount[d.telefono]||0)<d.total_mensajes).length;
+  document.title=totalUnread>0?`(${totalUnread}) Naylan Admin — R8ATUR`:'Naylan Admin — R8ATUR';
   if(!phone)return;
   const conv=data.find(d=>d.telefono===phone);
   if(!conv)return;
@@ -742,6 +776,17 @@ async function refresh(){
     lastMsgTs=conv.ultimo_mensaje;
     await loadChat();
   }
+}
+
+function showBrowserNotif(conv){
+  if(!notifEnabled)return;
+  const titulo='Nuevo mensaje — Naylan';
+  const cuerpo=(conv.nombre_perfil||conv.telefono)+' escribió un mensaje';
+  try{
+    const n=new Notification(titulo,{body:cuerpo,icon:'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAADAAAAAwCAYAAABXAvmHAAAA'});
+    n.onclick=()=>{window.focus();selectConv(conv.telefono,conv.handoff_status||'BOT_ACTIVE',conv.assigned_agent||'',conv.handoff_priority||'NORMAL',conv.nombre_perfil||'',conv.total_mensajes);};
+    setTimeout(()=>n.close(),6000);
+  }catch(_){}
 }
 
 function fmtStatus(s,p){
