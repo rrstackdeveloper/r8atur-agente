@@ -566,10 +566,10 @@ function renderConvs(rawData){
     const hp=d.handoff_priority||'NORMAL';
     const isCritical=hs==='WAITING_HUMAN'&&hp==='CRITICAL';
     const nombre=d.nombre_perfil?`<div class="conv-nombre">${esc(d.nombre_perfil)}</div>`:'';
-    const unread=d.telefono!==phone&&(lastKnownCount[d.telefono]||0)<d.total_mensajes;
-    const unreadCount=unread?d.total_mensajes-(lastKnownCount[d.telefono]||0):0;
+    const unread=d.telefono!==phone&&(lastKnownCount[d.telefono]||0)<d.mensajes_entrantes;
+    const unreadCount=unread?d.mensajes_entrantes-(lastKnownCount[d.telefono]||0):0;
     const badge=unread?`<span class="unread-badge">${unreadCount>99?'99+':unreadCount}</span>`:'';
-    return `<div class="conv-item ${d.telefono===phone?'active':''}${unread?' unread':''}" onclick="selectConv('${d.telefono}','${hs}','${d.assigned_agent||''}','${hp}','${esc(d.nombre_perfil||'')}',${d.total_mensajes})">
+    return `<div class="conv-item ${d.telefono===phone?'active':''}${unread?' unread':''}" onclick="selectConv('${d.telefono}','${hs}','${d.assigned_agent||''}','${hp}','${esc(d.nombre_perfil||'')}',${d.mensajes_entrantes})">
       ${nombre}
       <div class="conv-phone">${d.telefono}</div>
       <div class="conv-meta">
@@ -587,8 +587,8 @@ async function loadConvs(){
   const data=await r.json();
   // Al cargar por primera vez: marcar todo como visto y notificado (no spamear al abrir)
   data.forEach(d=>{
-    if(!(d.telefono in lastKnownCount))lastKnownCount[d.telefono]=d.total_mensajes;
-    if(!(d.telefono in lastNotifiedCount))lastNotifiedCount[d.telefono]=d.total_mensajes;
+    if(!(d.telefono in lastKnownCount))lastKnownCount[d.telefono]=d.mensajes_entrantes;
+    if(!(d.telefono in lastNotifiedCount))lastNotifiedCount[d.telefono]=d.mensajes_entrantes;
   });
   renderConvs(data);
 }
@@ -615,7 +615,7 @@ async function selectConvByPhone(p){
   if(!r.ok)return;
   const data=await r.json();
   const conv=data.find(d=>d.telefono===p||d.telefono===p.replace('+',''));
-  if(conv)await selectConv(conv.telefono,conv.handoff_status||'BOT_ACTIVE',conv.assigned_agent||'',conv.handoff_priority||'NORMAL',conv.nombre_perfil||'',conv.total_mensajes);
+  if(conv)await selectConv(conv.telefono,conv.handoff_status||'BOT_ACTIVE',conv.assigned_agent||'',conv.handoff_priority||'NORMAL',conv.nombre_perfil||'',conv.mensajes_entrantes);
 }
 
 async function loadChat(){
@@ -748,23 +748,22 @@ async function refresh(){
   data.forEach(conv=>{
     if(conv.telefono===phone){
       // Conversación activa: marcar como leída automáticamente
-      lastKnownCount[conv.telefono]=conv.total_mensajes;
-      lastNotifiedCount[conv.telefono]=conv.total_mensajes;
+      lastKnownCount[conv.telefono]=conv.mensajes_entrantes;
+      lastNotifiedCount[conv.telefono]=conv.mensajes_entrantes;
       return;
     }
     const prevNotif=lastNotifiedCount[conv.telefono];
-    const esConyNueva=prevNotif===undefined; // no existía en la carga inicial
-    const hayMensajesNuevos=prevNotif!==undefined&&conv.total_mensajes>prevNotif;
+    const esConyNueva=prevNotif===undefined;
+    const hayMensajesNuevos=prevNotif!==undefined&&conv.mensajes_entrantes>prevNotif;
     if(esConyNueva||hayMensajesNuevos){
       showBrowserNotif(conv);
-      lastNotifiedCount[conv.telefono]=conv.total_mensajes;
-      // Si es conversación nueva, el badge arranca desde 0 (todos los msgs son "nuevos")
+      lastNotifiedCount[conv.telefono]=conv.mensajes_entrantes;
       if(esConyNueva)lastKnownCount[conv.telefono]=0;
     }
   });
   renderConvs(data);
   // Actualizar título de pestaña con total de conversaciones no leídas
-  const totalUnread=data.filter(d=>d.telefono!==phone&&(lastKnownCount[d.telefono]||0)<d.total_mensajes).length;
+  const totalUnread=data.filter(d=>d.telefono!==phone&&(lastKnownCount[d.telefono]||0)<d.mensajes_entrantes).length;
   document.title=totalUnread>0?`(${totalUnread}) Naylan Admin — R8ATUR`:'Naylan Admin — R8ATUR';
   if(!phone)return;
   const conv=data.find(d=>d.telefono===phone);
@@ -795,7 +794,7 @@ function showBrowserNotif(conv){
   const cuerpo=(conv.nombre_perfil||conv.telefono)+' escribió un mensaje';
   try{
     const n=new Notification(titulo,{body:cuerpo,icon:'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAADAAAAAwCAYAAABXAvmHAAAA'});
-    n.onclick=()=>{window.focus();selectConv(conv.telefono,conv.handoff_status||'BOT_ACTIVE',conv.assigned_agent||'',conv.handoff_priority||'NORMAL',conv.nombre_perfil||'',conv.total_mensajes);};
+    n.onclick=()=>{window.focus();selectConv(conv.telefono,conv.handoff_status||'BOT_ACTIVE',conv.assigned_agent||'',conv.handoff_priority||'NORMAL',conv.nombre_perfil||'',conv.mensajes_entrantes);};
     setTimeout(()=>n.close(),6000);
   }catch(_){}
 }

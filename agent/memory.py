@@ -360,6 +360,9 @@ async def listar_conversaciones() -> list[dict]:
                 Mensaje.telefono,
                 func.max(Mensaje.timestamp).label("ultimo_timestamp"),
                 func.count(Mensaje.id).label("total_mensajes"),
+                func.sum(
+                    func.cast(Mensaje.role == "user", Integer)
+                ).label("mensajes_entrantes"),
             )
             .group_by(Mensaje.telefono)
             .order_by(func.max(Mensaje.timestamp).desc())
@@ -380,6 +383,7 @@ async def listar_conversaciones() -> list[dict]:
                 "telefono": row.telefono,
                 "ultimo_mensaje": row.ultimo_timestamp.isoformat() if row.ultimo_timestamp else None,
                 "total_mensajes": row.total_mensajes,
+                "mensajes_entrantes": int(row.mensajes_entrantes or 0),
                 "modo": estados[row.telefono].modo if row.telefono in estados else "bot",
                 "handoff_status": estados[row.telefono].handoff_status if row.telefono in estados else "BOT_ACTIVE",
                 "handoff_priority": estados[row.telefono].handoff_priority if row.telefono in estados else "NORMAL",
