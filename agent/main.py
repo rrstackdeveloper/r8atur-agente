@@ -5,7 +5,7 @@ import yaml
 import logging
 from collections import deque
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, Request, HTTPException, Header, Depends
+from fastapi import FastAPI, Request, HTTPException, Header, Depends, UploadFile, File, Form
 from fastapi.responses import PlainTextResponse, HTMLResponse, JSONResponse
 from pydantic import BaseModel
 from dotenv import load_dotenv
@@ -415,6 +415,17 @@ header h1{font-size:1.1rem}
 .msg-assistant{align-self:flex-start;background:white;border-bottom-left-radius:2px}
 .msg-time{font-size:.68rem;color:#999;margin-top:.2rem}
 .msg-time-right{text-align:right}
+#file-preview{display:none;align-items:center;gap:.75rem;padding:.5rem 1rem;background:#f0f2f5;border-top:1px solid #e2e8f0;flex-shrink:0}
+#file-preview-thumb{width:48px;height:48px;object-fit:cover;border-radius:6px;display:none}
+#file-preview-icon{width:48px;height:48px;background:#e2e8f0;border-radius:6px;display:flex;align-items:center;justify-content:center;font-size:1.4rem;flex-shrink:0}
+#file-preview-info{flex:1;min-width:0}
+#file-preview-name{font-size:.82rem;font-weight:600;color:#1a202c;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#file-preview-size{font-size:.72rem;color:#718096;margin-top:.1rem}
+#file-cancel{background:none;border:none;cursor:pointer;color:#718096;font-size:1.2rem;padding:.25rem;border-radius:4px}
+#file-cancel:hover{color:#e53e3e;background:#fff5f5}
+#attach-btn{background:none;border:none;cursor:pointer;color:#718096;padding:.4rem;border-radius:50%;display:flex;align-items:center;justify-content:center;flex-shrink:0}
+#attach-btn:hover{background:#f0f2f5;color:#128C7E}
+#attach-btn:disabled{opacity:.4;cursor:not-allowed}
 #input-area{background:white;padding:.75rem 1rem;display:flex;gap:.75rem;align-items:flex-end;border-top:1px solid #e2e8f0}
 #msg-input{flex:1;padding:.6rem .9rem;border:1px solid #e2e8f0;border-radius:20px;font-size:.9rem;resize:none;min-height:42px;max-height:120px;outline:none;font-family:inherit;transition:background .15s}
 #msg-input:focus{border-color:#128C7E}
@@ -463,7 +474,20 @@ header h1{font-size:1.1rem}
           </div>
         </div>
         <div id="messages"></div>
+        <div id="file-preview">
+          <img id="file-preview-thumb" src="" alt="">
+          <div id="file-preview-icon" style="display:none">📄</div>
+          <div id="file-preview-info">
+            <div id="file-preview-name"></div>
+            <div id="file-preview-size"></div>
+          </div>
+          <button id="file-cancel" onclick="cancelFile()" title="Cancelar">✕</button>
+        </div>
         <div id="input-area">
+          <input type="file" id="file-input" accept="image/jpeg,image/png,image/webp,application/pdf" style="display:none" onchange="handleFileSelect(event)">
+          <button id="attach-btn" onclick="document.getElementById('file-input').click()" title="Adjuntar imagen o PDF">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/></svg>
+          </button>
           <textarea id="msg-input" rows="1"
             onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendMsg()}"
             oninput="this.style.height='auto';this.style.height=this.scrollHeight+'px'"></textarea>
@@ -477,9 +501,9 @@ header h1{font-size:1.1rem}
 </div>
 <script>
 let key=null,agentName='',phone=null,handoffStatus='BOT_ACTIVE',assignedAgent=null,handoffPriority='NORMAL',timer=null,lastMsgTs=null,clienteNombre=null;
-const lastKnownCount={};   // phone → count cuando el agente abrió la conv (para badge)
-const lastNotifiedCount={}; // phone → count cuando se envió la última notificación (evita spam)
-let notifEnabled=false;
+const lastKnownCount={};
+const lastNotifiedCount={};
+let notifEnabled=false,pendingFile=null;
 
 function apiH(){return{'X-Agent-Token':key,'Content-Type':'application/json'};}
 function apiHGet(){return{'X-Agent-Token':key};}
@@ -638,20 +662,71 @@ async function loadChat(){
   }
 }
 
+function handleFileSelect(e){
+  const file=e.target.files[0];
+  if(!file)return;
+  const isImg=file.type.startsWith('image/');
+  const isPDF=file.type==='application/pdf';
+  if(!isImg&&!isPDF){alert('Solo se permiten imágenes (JPG, PNG, WebP) y PDF.');return;}
+  pendingFile={file,tipo:isImg?'image':'document'};
+  const thumb=document.getElementById('file-preview-thumb');
+  const icon=document.getElementById('file-preview-icon');
+  document.getElementById('file-preview-name').textContent=file.name;
+  document.getElementById('file-preview-size').textContent=fmtSize(file.size);
+  if(isImg){
+    const reader=new FileReader();
+    reader.onload=ev=>{thumb.src=ev.target.result;thumb.style.display='block';icon.style.display='none';};
+    reader.readAsDataURL(file);
+  } else {
+    thumb.style.display='none';icon.style.display='flex';icon.textContent='📄';
+  }
+  document.getElementById('file-preview').style.display='flex';
+  document.getElementById('msg-input').placeholder='Escribe un pie de foto (opcional)...';
+  e.target.value='';
+}
+
+function cancelFile(){
+  pendingFile=null;
+  document.getElementById('file-preview').style.display='none';
+  document.getElementById('file-preview-thumb').src='';
+  document.getElementById('msg-input').placeholder='';
+  updateStatusUI();
+}
+
+function fmtSize(b){if(b<1024)return b+'B';if(b<1048576)return(b/1024).toFixed(1)+'KB';return(b/1048576).toFixed(1)+'MB';}
+
 async function sendMsg(){
   if(!phone)return;
-  if(handoffStatus==='WAITING_HUMAN')return; // bloqueado
+  if(handoffStatus==='WAITING_HUMAN')return;
   const inp=document.getElementById('msg-input');
-  const txt=inp.value.trim();if(!txt)return;
-  document.getElementById('send-btn').disabled=true;
-  inp.value='';inp.style.height='auto';
-  await fetch('/admin/api/conversaciones/'+encodeURIComponent(phone)+'/mensaje',{
-    method:'POST',
-    headers:apiH(),
-    body:JSON.stringify({texto:txt})
-  });
-  document.getElementById('send-btn').disabled=false;
-  await loadChat();inp.focus();
+  const txt=inp.value.trim();
+  const sendBtn=document.getElementById('send-btn');
+  sendBtn.disabled=true;
+
+  if(pendingFile){
+    const fd=new FormData();
+    fd.append('file',pendingFile.file);
+    if(txt)fd.append('caption',txt);
+    const r=await fetch('/admin/api/conversaciones/'+encodeURIComponent(phone)+'/media',{
+      method:'POST',
+      headers:{'X-Agent-Token':key},
+      body:fd
+    });
+    cancelFile();
+    inp.value='';inp.style.height='auto';
+    sendBtn.disabled=false;
+    if(!r.ok){const d=await r.json().catch(()=>({}));alert('Error enviando archivo: '+(d.detail||r.status));}
+    else await loadChat();
+  } else {
+    if(!txt){sendBtn.disabled=false;return;}
+    inp.value='';inp.style.height='auto';
+    await fetch('/admin/api/conversaciones/'+encodeURIComponent(phone)+'/mensaje',{
+      method:'POST',headers:apiH(),body:JSON.stringify({texto:txt})
+    });
+    sendBtn.disabled=false;
+    await loadChat();
+  }
+  inp.focus();
 }
 
 async function tomarConv(){
@@ -860,6 +935,41 @@ async def admin_enviar(
     if ok:
         await guardar_mensaje(telefono, "assistant", body.texto)
     return {"ok": ok}
+
+
+@app.post("/admin/api/conversaciones/{telefono}/media")
+async def admin_enviar_media(
+    telefono: str,
+    file: UploadFile = File(...),
+    caption: str = Form(default=""),
+    agente: dict = Depends(_get_agente),
+):
+    """Sube un archivo a Meta y lo envía al cliente como imagen o documento."""
+    if proveedor is None:
+        raise HTTPException(status_code=503, detail="Proveedor no inicializado")
+    from agent.providers.meta import ProveedorMeta
+    if not isinstance(proveedor, ProveedorMeta):
+        raise HTTPException(status_code=400, detail="Envío de media solo disponible con Meta Cloud API")
+
+    mime_type = file.content_type or "application/octet-stream"
+    filename = file.filename or "archivo"
+    file_bytes = await file.read()
+
+    tipo = "image" if mime_type.startswith("image/") else "document"
+
+    media_id = await proveedor.subir_media(file_bytes, mime_type, filename)
+    if not media_id:
+        raise HTTPException(status_code=502, detail="Error subiendo archivo a Meta")
+
+    ok = await proveedor.enviar_media(telefono, media_id, tipo, caption=caption, filename=filename)
+    if ok:
+        desc = f"[{tipo.capitalize()} enviado: {filename}]"
+        if caption:
+            desc += f" — {caption}"
+        await guardar_mensaje(telefono, "assistant", desc)
+        logger.info(f"Media enviada a {telefono}: {filename} ({mime_type})")
+
+    return {"ok": ok, "tipo": tipo, "filename": filename}
 
 
 @app.post("/admin/api/conversaciones/{telefono}/modo")

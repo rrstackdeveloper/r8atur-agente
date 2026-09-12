@@ -88,6 +88,56 @@ class ProveedorMeta(ProveedorWhatsApp):
                 logger.error(f"Error Meta API: {r.status_code} — {r.text}")
             return r.status_code == 200
 
+    async def subir_media(self, file_bytes: bytes, mime_type: str, filename: str) -> str | None:
+        """Sube un archivo a Meta y retorna el media_id."""
+        if not self.access_token or not self.phone_number_id:
+            return None
+        url = f"https://graph.facebook.com/{self.api_version}/{self.phone_number_id}/media"
+        async with httpx.AsyncClient(timeout=60) as client:
+            r = await client.post(
+                url,
+                headers={"Authorization": f"Bearer {self.access_token}"},
+                data={"messaging_product": "whatsapp", "type": mime_type},
+                files={"file": (filename, file_bytes, mime_type)},
+            )
+            if r.status_code != 200:
+                logger.error(f"Error subiendo media a Meta: {r.status_code} — {r.text}")
+                return None
+            return r.json().get("id")
+
+    async def enviar_media(
+        self,
+        telefono: str,
+        media_id: str,
+        tipo: str,
+        caption: str = "",
+        filename: str = "",
+    ) -> bool:
+        """Envía imagen o documento via Meta Cloud API usando un media_id."""
+        if not self.access_token or not self.phone_number_id:
+            return False
+        url = f"https://graph.facebook.com/{self.api_version}/{self.phone_number_id}/messages"
+        headers = {
+            "Authorization": f"Bearer {self.access_token}",
+            "Content-Type": "application/json",
+        }
+        media_obj: dict = {"id": media_id}
+        if caption:
+            media_obj["caption"] = caption
+        if tipo == "document" and filename:
+            media_obj["filename"] = filename
+        payload = {
+            "messaging_product": "whatsapp",
+            "to": telefono,
+            "type": tipo,
+            tipo: media_obj,
+        }
+        async with httpx.AsyncClient() as client:
+            r = await client.post(url, json=payload, headers=headers)
+            if r.status_code != 200:
+                logger.error(f"Error enviando media: {r.status_code} — {r.text}")
+            return r.status_code == 200
+
     async def enviar_plantilla_handoff(
         self,
         telefono: str,
