@@ -376,7 +376,7 @@ header h1{font-size:1.1rem}
 #conv-list{width:300px;min-width:300px;background:white;border-right:1px solid #e2e8f0;overflow-y:auto;display:flex;flex-direction:column}
 #conv-list h3{padding:.75rem 1rem;font-size:.75rem;color:#666;text-transform:uppercase;letter-spacing:.05em;border-bottom:1px solid #e2e8f0;flex-shrink:0}
 #conv-items{flex:1;overflow-y:auto}
-.conv-item{padding:.85rem 1rem;cursor:pointer;border-bottom:1px solid #f0f2f5;transition:background .15s}
+.conv-item{padding:.85rem 1rem;cursor:pointer;border-bottom:1px solid #f0f2f5;transition:background .15s;touch-action:manipulation;-webkit-tap-highlight-color:transparent}
 .conv-item:hover{background:#f7f8fa}
 .conv-item.active{background:#e6f3f2;border-left:3px solid #128C7E}
 .conv-nombre{font-weight:700;font-size:.9rem;color:#1a202c}
@@ -444,7 +444,9 @@ header h1{font-size:1.1rem}
   #chat-panel{display:none!important}
   .chat-abierto #conv-list{display:none!important}
   .chat-abierto #chat-panel{display:flex!important}
-  #back-btn{display:flex!important}
+  .chat-abierto #chat-content{display:flex!important}
+  .chat-abierto #empty-state{display:none!important}
+  .chat-abierto #back-btn{display:flex!important}
   .conv-item{padding:1rem}
   .action-btn{padding:.55rem .9rem;font-size:.8rem}
   #chat-header{padding:.6rem .85rem;gap:.35rem;flex-wrap:nowrap;align-items:center}
@@ -483,7 +485,7 @@ header h1{font-size:1.1rem}
       <div id="empty-state">← Selecciona una conversación</div>
       <div id="chat-content" style="display:none;flex:1;flex-direction:column;overflow:hidden">
         <div id="chat-header">
-          <button id="back-btn" onclick="goBack()" title="Volver">
+          <button id="back-btn" onclick="goBack()" title="Volver" style="display:none">
             <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M15 18l-6-6 6-6"/></svg>
           </button>
           <div id="chat-header-left">
