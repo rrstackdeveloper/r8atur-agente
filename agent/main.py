@@ -491,7 +491,7 @@ header h1{font-size:1.1rem}
       <div id="empty-state">← Selecciona una conversación</div>
       <div id="chat-content" style="display:none;flex:1;flex-direction:column;overflow:hidden">
         <div id="chat-header">
-          <button id="back-btn" onclick="goBack()" title="Volver" style="display:none">
+          <button id="back-btn" onclick="goBack()" title="Volver">
             <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M15 18l-6-6 6-6"/></svg>
           </button>
           <div id="chat-header-left">
