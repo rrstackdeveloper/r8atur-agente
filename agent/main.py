@@ -437,22 +437,23 @@ header h1{font-size:1.1rem}
 #back-btn:hover{background:#e6f3f2}
 @media(max-width:768px){
   body{overflow:hidden}
+  header{padding:.6rem 1rem}
   header h1{font-size:.95rem}
   #agent-display{display:none}
-  .content{position:relative;overflow:hidden}
-  #conv-list{position:absolute;top:0;left:0;width:100%;height:100%;min-width:unset;transform:translateX(0);transition:transform .25s ease;z-index:2}
-  #chat-panel{position:absolute;top:0;left:0;width:100%;height:100%;transform:translateX(100%);transition:transform .25s ease;z-index:3}
-  .chat-abierto #conv-list{transform:translateX(-100%)}
-  .chat-abierto #chat-panel{transform:translateX(0)}
+  #conv-list{width:100%;min-width:100%;border-right:none}
+  #chat-panel{display:none!important}
+  .chat-abierto #conv-list{display:none!important}
+  .chat-abierto #chat-panel{display:flex!important}
   #back-btn{display:flex!important}
   .conv-item{padding:1rem}
-  .action-btn{padding:.5rem .85rem;font-size:.8rem}
-  #chat-header{padding:.6rem .85rem;gap:.35rem}
-  #chat-phone{font-size:.9rem}
+  .action-btn{padding:.55rem .9rem;font-size:.8rem}
+  #chat-header{padding:.6rem .85rem;gap:.35rem;flex-wrap:nowrap;align-items:center}
+  #chat-actions{gap:.35rem;flex-wrap:wrap}
+  #chat-phone{font-size:.88rem}
   #msg-input{font-size:1rem}
   #send-btn,#attach-btn{width:46px;height:46px}
-  .msg{max-width:85%}
-  #chat-actions{gap:.35rem}
+  .msg{max-width:88%}
+  #override-warning{font-size:.7rem}
 }
 </style>
 </head>
