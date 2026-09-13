@@ -433,6 +433,27 @@ header h1{font-size:1.1rem}
 #send-btn{background:#128C7E;color:white;border:none;border-radius:50%;width:42px;height:42px;cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0}
 #send-btn:disabled{background:#ccc;cursor:not-allowed}
 #empty-state{flex:1;display:flex;align-items:center;justify-content:center;color:#999;font-size:.95rem}
+#back-btn{display:none;background:none;border:none;color:#128C7E;cursor:pointer;padding:.3rem .5rem;margin-right:.25rem;border-radius:6px;align-items:center;justify-content:center}
+#back-btn:hover{background:#e6f3f2}
+@media(max-width:768px){
+  body{overflow:hidden}
+  header h1{font-size:.95rem}
+  #agent-display{display:none}
+  .content{position:relative;overflow:hidden}
+  #conv-list{position:absolute;top:0;left:0;width:100%;height:100%;min-width:unset;transform:translateX(0);transition:transform .25s ease;z-index:2}
+  #chat-panel{position:absolute;top:0;left:0;width:100%;height:100%;transform:translateX(100%);transition:transform .25s ease;z-index:3}
+  .chat-abierto #conv-list{transform:translateX(-100%)}
+  .chat-abierto #chat-panel{transform:translateX(0)}
+  #back-btn{display:flex!important}
+  .conv-item{padding:1rem}
+  .action-btn{padding:.5rem .85rem;font-size:.8rem}
+  #chat-header{padding:.6rem .85rem;gap:.35rem}
+  #chat-phone{font-size:.9rem}
+  #msg-input{font-size:1rem}
+  #send-btn,#attach-btn{width:46px;height:46px}
+  .msg{max-width:85%}
+  #chat-actions{gap:.35rem}
+}
 </style>
 </head>
 <body>
@@ -461,6 +482,9 @@ header h1{font-size:1.1rem}
       <div id="empty-state">← Selecciona una conversación</div>
       <div id="chat-content" style="display:none;flex:1;flex-direction:column;overflow:hidden">
         <div id="chat-header">
+          <button id="back-btn" onclick="goBack()" title="Volver">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M15 18l-6-6 6-6"/></svg>
+          </button>
           <div id="chat-header-left">
             <div id="chat-phone"></div>
             <div id="chat-subtitle"></div>
@@ -507,6 +531,8 @@ let notifEnabled=false,pendingFile=null;
 
 function apiH(){return{'X-Agent-Token':key,'Content-Type':'application/json'};}
 function apiHGet(){return{'X-Agent-Token':key};}
+function isMobile(){return window.innerWidth<=768;}
+function goBack(){document.getElementById('app').classList.remove('chat-abierto');}
 
 async function login(){
   const username=document.getElementById('username-input').value.trim();
@@ -624,8 +650,8 @@ async function selectConv(t,hs,aa,hp,nombre,totalMsgs){
   handoffPriority=hp||'NORMAL';
   clienteNombre=nombre||null;
   lastMsgTs=null;
-  // Marcar como leída y resetear notificaciones
   if(totalMsgs!==undefined){lastKnownCount[t]=totalMsgs;lastNotifiedCount[t]=totalMsgs;}
+  if(isMobile())document.getElementById('app').classList.add('chat-abierto');
   document.getElementById('empty-state').style.display='none';
   document.getElementById('chat-content').style.display='flex';
   document.getElementById('chat-phone').textContent=clienteNombre||t;
@@ -754,6 +780,7 @@ async function devolverConv(){
   });
   handoffStatus='BOT_ACTIVE';assignedAgent=null;
   updateStatusUI();await loadConvs();
+  if(isMobile())goBack();
 }
 
 async function finalizarConv(){
@@ -764,6 +791,7 @@ async function finalizarConv(){
   });
   handoffStatus='BOT_ACTIVE';assignedAgent=null;
   updateStatusUI();await loadConvs();
+  if(isMobile())goBack();
 }
 
 function updateStatusUI(){
