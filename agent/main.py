@@ -408,7 +408,7 @@ header h1{font-size:1.1rem}
 #finalizar-btn{background:#3182ce;color:white}
 #finalizar-btn:hover{background:#2b6cb0}
 #override-warning{font-size:.75rem;color:#e53e3e;background:#fff5f5;border:1px solid #fed7d7;border-radius:6px;padding:.3rem .6rem}
-#messages{flex:1;overflow-y:auto;padding:1rem;display:flex;flex-direction:column;gap:.4rem}
+#messages{flex:1;min-height:0;overflow-y:auto;padding:1rem;display:flex;flex-direction:column;gap:.4rem}
 .msg-wrap{display:flex;flex-direction:column}
 .msg{max-width:70%;padding:.6rem .9rem;border-radius:10px;font-size:.88rem;line-height:1.45;white-space:pre-wrap;word-break:break-word}
 .msg-user{align-self:flex-end;background:#dcf8c6;border-bottom-right-radius:2px}
@@ -426,7 +426,7 @@ header h1{font-size:1.1rem}
 #attach-btn{background:none;border:none;cursor:pointer;color:#718096;padding:.4rem;border-radius:50%;display:flex;align-items:center;justify-content:center;flex-shrink:0}
 #attach-btn:hover{background:#f0f2f5;color:#128C7E}
 #attach-btn:disabled{opacity:.4;cursor:not-allowed}
-#input-area{background:white;padding:.75rem 1rem;display:flex;gap:.75rem;align-items:flex-end;border-top:1px solid #e2e8f0}
+#input-area{background:white;padding:.75rem 1rem;padding-bottom:max(.75rem,env(safe-area-inset-bottom));display:flex;gap:.75rem;align-items:flex-end;border-top:1px solid #e2e8f0;flex-shrink:0}
 #msg-input{flex:1;padding:.6rem .9rem;border:1px solid #e2e8f0;border-radius:20px;font-size:.9rem;resize:none;min-height:42px;max-height:120px;outline:none;font-family:inherit;transition:background .15s}
 #msg-input:focus{border-color:#128C7E}
 #msg-input:disabled{background:#f7f8fa;color:#999;cursor:not-allowed}
@@ -489,7 +489,7 @@ header h1{font-size:1.1rem}
     </div>
     <div id="chat-panel">
       <div id="empty-state">← Selecciona una conversación</div>
-      <div id="chat-content" style="display:none;flex:1;flex-direction:column;overflow:hidden">
+      <div id="chat-content" style="display:none;flex:1;min-height:0;flex-direction:column;overflow:hidden">
         <div id="chat-header">
           <button id="back-btn" onclick="goBack()" title="Volver">
             <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M15 18l-6-6 6-6"/></svg>
