@@ -541,7 +541,10 @@ let notifEnabled=false,pendingFile=null;
 function apiH(){return{'X-Agent-Token':key,'Content-Type':'application/json'};}
 function apiHGet(){return{'X-Agent-Token':key};}
 function isMobile(){return window.innerWidth<=768;}
-function goBack(){document.getElementById('app').classList.remove('chat-abierto');}
+function goBack(){
+  document.getElementById('app').classList.remove('chat-abierto');
+  document.getElementById('back-btn').style.display='none';
+}
 
 async function login(){
   const username=document.getElementById('username-input').value.trim();
@@ -660,7 +663,10 @@ async function selectConv(t,hs,aa,hp,nombre,totalMsgs){
   clienteNombre=nombre||null;
   lastMsgTs=null;
   if(totalMsgs!==undefined){lastKnownCount[t]=totalMsgs;lastNotifiedCount[t]=totalMsgs;}
-  if(isMobile())document.getElementById('app').classList.add('chat-abierto');
+  if(isMobile()){
+    document.getElementById('app').classList.add('chat-abierto');
+    document.getElementById('back-btn').style.display='flex';
+  }
   document.getElementById('empty-state').style.display='none';
   document.getElementById('chat-content').style.display='flex';
   document.getElementById('chat-phone').textContent=clienteNombre||t;
