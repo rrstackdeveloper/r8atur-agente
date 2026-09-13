@@ -448,10 +448,16 @@ header h1{font-size:1.1rem}
   .chat-abierto #empty-state{display:none!important}
   .chat-abierto #back-btn{display:flex!important}
   .conv-item{padding:1rem}
-  .action-btn{padding:.55rem .9rem;font-size:.8rem}
-  #chat-header{padding:.6rem .85rem;gap:.35rem;flex-wrap:nowrap;align-items:center}
-  #chat-actions{gap:.35rem;flex-wrap:wrap}
-  #chat-phone{font-size:.88rem}
+  #chat-header{padding:.5rem .75rem;gap:.3rem;flex-wrap:wrap;align-items:center}
+  #chat-header-left{flex:1;min-width:0}
+  #chat-phone{font-size:.85rem}
+  #chat-subtitle{font-size:.75rem}
+  #chat-count{font-size:.7rem}
+  #chat-actions{flex-basis:100%;gap:.3rem;flex-wrap:nowrap}
+  .action-btn{flex:1;min-width:0;padding:.45rem .4rem;font-size:.72rem;text-align:center}
+  #override-warning{font-size:.65rem;flex-basis:100%}
+  .btn-full{display:none!important}
+  .btn-short{display:inline!important}
   #msg-input{font-size:1rem}
   #send-btn,#attach-btn{width:46px;height:46px}
   .msg{max-width:88%}
@@ -495,9 +501,9 @@ header h1{font-size:1.1rem}
           </div>
           <div id="chat-actions">
             <span id="override-warning" style="display:none"></span>
-            <button id="tomar-btn" class="action-btn" style="display:none" onclick="tomarConv()">👤 Tomar conversación</button>
-            <button id="devolver-btn" class="action-btn" style="display:none" onclick="devolverConv()">🤖 Devolver a Naylan</button>
-            <button id="finalizar-btn" class="action-btn" style="display:none" onclick="finalizarConv()">✅ Finalizar atención</button>
+            <button id="tomar-btn" class="action-btn" style="display:none" onclick="tomarConv()"><span class="btn-full">👤 Tomar conversación</span><span class="btn-short" style="display:none">👤 Tomar</span></button>
+            <button id="devolver-btn" class="action-btn" style="display:none" onclick="devolverConv()"><span class="btn-full">🤖 Devolver a Naylan</span><span class="btn-short" style="display:none">🤖 Devolver</span></button>
+            <button id="finalizar-btn" class="action-btn" style="display:none" onclick="finalizarConv()"><span class="btn-full">✅ Finalizar atención</span><span class="btn-short" style="display:none">✅ Finalizar</span></button>
           </div>
         </div>
         <div id="messages"></div>
