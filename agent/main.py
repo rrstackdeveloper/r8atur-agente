@@ -352,6 +352,23 @@ async def debug_agentes():
         return [{"id": a.id, "nombre": a.nombre, "enabled": a.enabled, "hash_len": len(a.password_hash)} for a in agentes]
 
 
+@app.get("/admin/debug/env-passwords")
+async def debug_env_passwords():
+    """Diagnóstico: muestra info de env vars de passwords sin exponerlos."""
+    result = {}
+    for ag_id in ["alejandro", "yanara", "jose"]:
+        val = os.getenv(f"AGENT_{ag_id.upper()}_PASSWORD", "")
+        result[ag_id] = {
+            "len": len(val),
+            "first2": val[:2] if len(val) >= 2 else val,
+            "last2": val[-2:] if len(val) >= 2 else val,
+            "has_quotes": val.startswith('"') or val.startswith("'"),
+            "has_spaces": val != val.strip(),
+            "empty": val == "",
+        }
+    return result
+
+
 @app.post("/admin/agentes/{agente_id}/reset-password")
 async def admin_reset_password(
     agente_id: str,
