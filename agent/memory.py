@@ -472,7 +472,7 @@ async def validar_credenciales(username: str, password: str) -> "Agente | None":
     """Valida usuario y contraseña. Retorna el objeto Agente o None."""
     async with get_session()() as session:
         result = await session.execute(
-            select(Agente).where(Agente.id == username, Agente.enabled == True)
+            select(Agente).where(Agente.id == username.lower().strip(), Agente.enabled == True)
         )
         agente = result.scalar_one_or_none()
         if agente and verify_password(password, agente.password_hash):

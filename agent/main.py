@@ -505,7 +505,7 @@ header h1{font-size:1.1rem}
   <div id="login-box">
     <h2>Naylan Admin</h2>
     <p>Panel de administración R8ATUR</p>
-    <input type="text" id="username-input" placeholder="Usuario (alejandro / yanara / jose)" autocomplete="username" onkeydown="if(event.key==='Enter')document.getElementById('pw').focus()">
+    <input type="text" id="username-input" placeholder="Usuario (alejandro / yanara / jose)" autocomplete="username" autocapitalize="off" autocorrect="off" spellcheck="false" onkeydown="if(event.key==='Enter')document.getElementById('pw').focus()">
     <input type="password" id="pw" placeholder="Contraseña" autocomplete="current-password" onkeydown="if(event.key==='Enter')login()">
     <button onclick="login()">Entrar</button>
     <p id="login-error">Usuario o contraseña incorrectos</p>
@@ -585,7 +585,7 @@ function goBack(){
 }
 
 async function login(){
-  const username=document.getElementById('username-input').value.trim();
+  const username=document.getElementById('username-input').value.trim().toLowerCase();
   const pw=document.getElementById('pw').value;
   const err=document.getElementById('login-error');
   if(!username||!pw){
