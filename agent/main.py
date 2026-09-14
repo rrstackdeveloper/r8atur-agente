@@ -758,11 +758,15 @@ async function sendMsg(){
       headers:{'X-Agent-Token':key},
       body:fd
     });
+    const rData=await r.json().catch(()=>({}));
     cancelFile();
     inp.value='';inp.style.height='auto';
     sendBtn.disabled=false;
-    if(!r.ok){const d=await r.json().catch(()=>({}));alert('Error enviando archivo: '+(d.detail||r.status));}
-    else await loadChat();
+    if(!r.ok){
+      alert('Error enviando archivo:\n'+(rData.detail||'HTTP '+r.status));
+    } else {
+      await loadChat();
+    }
   } else {
     if(!txt){sendBtn.disabled=false;return;}
     inp.value='';inp.style.height='auto';
@@ -1005,19 +1009,24 @@ async def admin_enviar_media(
 
     tipo = "image" if mime_type.startswith("image/") else "document"
 
+    logger.info(f"Subiendo {tipo} a Meta: {filename} ({mime_type}, {len(file_bytes)} bytes)")
     media_id = await proveedor.subir_media(file_bytes, mime_type, filename)
     if not media_id:
-        raise HTTPException(status_code=502, detail="Error subiendo archivo a Meta")
+        logger.error(f"subir_media falló para {filename}")
+        raise HTTPException(status_code=502, detail="Error subiendo archivo a Meta — revisa logs")
 
+    logger.info(f"Media subida OK, media_id={media_id}. Enviando a {telefono}...")
     ok = await proveedor.enviar_media(telefono, media_id, tipo, caption=caption, filename=filename)
-    if ok:
-        desc = f"[{tipo.capitalize()} enviado: {filename}]"
-        if caption:
-            desc += f" — {caption}"
-        await guardar_mensaje(telefono, "assistant", desc)
-        logger.info(f"Media enviada a {telefono}: {filename} ({mime_type})")
+    if not ok:
+        logger.error(f"enviar_media falló: telefono={telefono}, media_id={media_id}, tipo={tipo}")
+        raise HTTPException(status_code=502, detail=f"Archivo subido pero no se pudo enviar a {telefono}")
 
-    return {"ok": ok, "tipo": tipo, "filename": filename}
+    desc = f"[{tipo.capitalize()} enviado: {filename}]"
+    if caption:
+        desc += f" — {caption}"
+    await guardar_mensaje(telefono, "assistant", desc)
+    logger.info(f"Media enviada OK a {telefono}: {filename}")
+    return {"ok": True, "tipo": tipo, "filename": filename}
 
 
 @app.post("/admin/api/conversaciones/{telefono}/modo")
