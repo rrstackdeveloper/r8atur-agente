@@ -40,6 +40,17 @@ class ProveedorMeta(ProveedorWhatsApp):
                     c.get("wa_id", ""): c.get("profile", {}).get("name")
                     for c in value.get("contacts", [])
                 }
+                # Log status updates (delivery receipts, errors) de mensajes enviados
+                for status in value.get("statuses", []):
+                    st = status.get("status")
+                    wamid = status.get("id", "?")
+                    recipient = status.get("recipient_id", "?")
+                    if st == "failed":
+                        errors = status.get("errors", [])
+                        logger.error(f"Meta status FAILED — wamid={wamid}, to={recipient}, errors={errors}")
+                    else:
+                        logger.info(f"Meta status {st} — wamid={wamid}, to={recipient}")
+
                 for msg in value.get("messages", []):
                     tipo = msg.get("type")
                     if tipo == "text":
@@ -134,9 +145,19 @@ class ProveedorMeta(ProveedorWhatsApp):
         }
         async with httpx.AsyncClient() as client:
             r = await client.post(url, json=payload, headers=headers)
+            try:
+                resp_json = r.json()
+            except Exception:
+                resp_json = {"raw": r.text}
             if r.status_code != 200:
-                logger.error(f"Error enviando media: {r.status_code} — {r.text}")
-            return r.status_code == 200
+                logger.error(f"Error enviando media HTTP {r.status_code}: {resp_json}")
+                return False
+            if "error" in resp_json:
+                logger.error(f"Meta API error en enviar_media: {resp_json['error']}")
+                return False
+            wamid = resp_json.get("messages", [{}])[0].get("id", "?")
+            logger.info(f"enviar_media OK — wamid={wamid}, to={telefono}, tipo={tipo}")
+            return True
 
     async def enviar_plantilla_handoff(
         self,
