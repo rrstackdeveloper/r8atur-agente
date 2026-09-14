@@ -815,7 +815,7 @@ async function sendMsg(){
     inp.value='';inp.style.height='auto';
     sendBtn.disabled=false;
     if(!r.ok){
-      alert('Error enviando archivo:\n'+(rData.detail||'HTTP '+r.status));
+      alert('Error enviando archivo:\\n'+(rData.detail||'HTTP '+r.status));
     } else {
       await loadChat();
     }
