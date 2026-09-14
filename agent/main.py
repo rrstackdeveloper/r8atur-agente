@@ -324,13 +324,11 @@ async def _get_agente(
 
 @app.post("/admin/auth/login")
 async def admin_login(body: LoginPayload):
-    logger.info(f"Login attempt: username='{body.username}' pw_len={len(body.password)}")
     agente = await validar_credenciales(body.username, body.password)
     if not agente:
-        logger.warning(f"Login FAILED para '{body.username}'")
         raise HTTPException(status_code=401, detail="Credenciales incorrectas")
     token, expires_at = await crear_sesion(agente.id, agente.nombre)
-    logger.info(f"Login OK: agente '{agente.id}' ({agente.nombre})")
+    logger.info(f"Login: agente '{agente.id}' ({agente.nombre})")
     return {"token": token, "nombre": agente.nombre, "expires_at": expires_at.isoformat()}
 
 
@@ -341,47 +339,6 @@ async def admin_logout(x_agent_token: str | None = Header(default=None)):
     return {"ok": True}
 
 
-@app.get("/admin/debug/agentes")
-async def debug_agentes():
-    """Diagnóstico temporal: lista agentes en BD (sin passwords)."""
-    from agent.memory import Agente, get_session
-    from sqlalchemy import select as sa_select
-    async with get_session()() as session:
-        result = await session.execute(sa_select(Agente))
-        agentes = result.scalars().all()
-        return [{"id": a.id, "nombre": a.nombre, "enabled": a.enabled, "hash_len": len(a.password_hash)} for a in agentes]
-
-
-@app.get("/admin/debug/env-passwords")
-async def debug_env_passwords():
-    """Diagnóstico: muestra info de env vars de passwords sin exponerlos."""
-    result = {}
-    for ag_id in ["alejandro", "yanara", "jose"]:
-        val = os.getenv(f"AGENT_{ag_id.upper()}_PASSWORD", "")
-        result[ag_id] = {
-            "len": len(val),
-            "first2": val[:2] if len(val) >= 2 else val,
-            "last2": val[-2:] if len(val) >= 2 else val,
-            "has_quotes": val.startswith('"') or val.startswith("'"),
-            "has_spaces": val != val.strip(),
-            "empty": val == "",
-        }
-    return result
-
-
-@app.get("/admin/debug/emergency-access")
-async def emergency_access(s: str = ""):
-    """Acceso de emergencia — crea sesión directa sin password."""
-    if s != "r8atur-ok-2024":
-        raise HTTPException(status_code=403, detail="Forbidden")
-    token, _ = await crear_sesion("jose", "Jose A.")
-    return {
-        "token": token,
-        "pasos": "Abre DevTools (F12) → Console y ejecuta las 3 líneas de abajo",
-        "cmd1": f"localStorage.setItem('ak', '{token}')",
-        "cmd2": "localStorage.setItem('agentName', 'Jose A.')",
-        "cmd3": "location.reload()",
-    }
 
 
 @app.post("/admin/agentes/{agente_id}/reset-password")
