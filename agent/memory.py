@@ -447,10 +447,14 @@ def verify_password(password: str, hashed: str) -> bool:
 
 
 async def crear_agente(agente_id: str, nombre: str, password: str, rol: str = "agente") -> bool:
-    """Crea un agente si no existe. Retorna True si fue creado, False si ya existía."""
+    """Crea el agente si no existe, o actualiza su password si ya existe. Retorna True si fue creado."""
     async with get_session()() as session:
         result = await session.execute(select(Agente).where(Agente.id == agente_id))
-        if result.scalar_one_or_none():
+        existing = result.scalar_one_or_none()
+        if existing:
+            existing.password_hash = hash_password(password)
+            existing.nombre = nombre
+            await session.commit()
             return False
         session.add(Agente(
             id=agente_id,
