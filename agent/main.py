@@ -76,6 +76,8 @@ async def seed_agentes_desde_config():
         creado = await crear_agente(agente_id, ag.get("nombre", agente_id), password, ag.get("rol", "agente"))
         if creado:
             logger.info(f"Agente '{agente_id}' ({ag.get('nombre', agente_id)}) creado en BD")
+        else:
+            logger.info(f"Agente '{agente_id}' — password sincronizado desde env var")
 
 
 @asynccontextmanager
