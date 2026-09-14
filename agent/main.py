@@ -324,11 +324,13 @@ async def _get_agente(
 
 @app.post("/admin/auth/login")
 async def admin_login(body: LoginPayload):
+    logger.info(f"Login attempt: username='{body.username}' pw_len={len(body.password)}")
     agente = await validar_credenciales(body.username, body.password)
     if not agente:
+        logger.warning(f"Login FAILED para '{body.username}'")
         raise HTTPException(status_code=401, detail="Credenciales incorrectas")
     token, expires_at = await crear_sesion(agente.id, agente.nombre)
-    logger.info(f"Login: agente '{agente.id}' ({agente.nombre})")
+    logger.info(f"Login OK: agente '{agente.id}' ({agente.nombre})")
     return {"token": token, "nombre": agente.nombre, "expires_at": expires_at.isoformat()}
 
 
@@ -337,6 +339,17 @@ async def admin_logout(x_agent_token: str | None = Header(default=None)):
     if x_agent_token:
         await invalidar_sesion(x_agent_token)
     return {"ok": True}
+
+
+@app.get("/admin/debug/agentes")
+async def debug_agentes():
+    """Diagnóstico temporal: lista agentes en BD (sin passwords)."""
+    from agent.memory import Agente, get_session
+    from sqlalchemy import select as sa_select
+    async with get_session()() as session:
+        result = await session.execute(sa_select(Agente))
+        agentes = result.scalars().all()
+        return [{"id": a.id, "nombre": a.nombre, "enabled": a.enabled, "hash_len": len(a.password_hash)} for a in agentes]
 
 
 @app.post("/admin/agentes/{agente_id}/reset-password")
