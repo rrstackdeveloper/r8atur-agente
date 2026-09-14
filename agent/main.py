@@ -446,12 +446,12 @@ header h1{font-size:1.1rem}
   #conv-list{width:100%;min-width:100%;border-right:none}
   #chat-panel{display:none!important}
   .chat-abierto #conv-list{display:none!important}
-  .chat-abierto #chat-panel{display:flex!important}
-  .chat-abierto #chat-content{display:grid!important;grid-template-rows:auto 1fr auto;height:100%}
+  .chat-abierto #chat-panel{display:flex!important;flex-direction:column;overflow:hidden}
+  .chat-abierto #chat-content{display:flex!important;flex-direction:column;flex:1;min-height:0;overflow:hidden}
   .chat-abierto #empty-state{display:none!important}
   .chat-abierto #back-btn{display:flex!important}
-  .chat-abierto #messages{overflow-y:auto;min-height:0}
-  .chat-abierto #input-area{position:relative}
+  .chat-abierto #messages{flex:1;min-height:0;overflow-y:auto}
+  .chat-abierto #input-area{flex-shrink:0}
   .conv-item{padding:1rem}
   #chat-header{padding:.5rem .75rem;gap:.3rem;flex-wrap:wrap;align-items:center}
   #chat-header-left{flex:1;min-width:0}
@@ -557,8 +557,12 @@ function goBack(){
 async function login(){
   const username=document.getElementById('username-input').value.trim();
   const pw=document.getElementById('pw').value;
-  if(!username||!pw)return;
   const err=document.getElementById('login-error');
+  if(!username||!pw){
+    err.textContent=!username?'Escribe tu usuario (alejandro, yanara o jose)':'Escribe tu contraseña';
+    err.style.display='block';
+    return;
+  }
   err.style.display='none';
   try{
     const r=await fetch('/admin/auth/login',{
@@ -676,7 +680,7 @@ async function selectConv(t,hs,aa,hp,nombre,totalMsgs){
     document.getElementById('back-btn').style.display='flex';
   }
   document.getElementById('empty-state').style.display='none';
-  document.getElementById('chat-content').style.display=isMobile()?'grid':'flex';
+  document.getElementById('chat-content').style.display='flex';
   document.getElementById('chat-phone').textContent=clienteNombre||t;
   document.getElementById('chat-count').textContent=clienteNombre?t:'';
   updateStatusUI();
