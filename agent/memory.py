@@ -189,6 +189,23 @@ async def limpiar_historial(telefono: str):
         await session.commit()
 
 
+async def horas_desde_ultimo_mensaje_cliente(telefono: str) -> float | None:
+    """Retorna cuántas horas pasaron desde el último mensaje del cliente (role='user').
+    Retorna None si no hay mensajes del cliente."""
+    async with get_session()() as session:
+        result = await session.execute(
+            select(Mensaje.timestamp)
+            .where(Mensaje.telefono == telefono, Mensaje.role == "user")
+            .order_by(Mensaje.timestamp.desc())
+            .limit(1)
+        )
+        row = result.scalar_one_or_none()
+        if row is None:
+            return None
+        delta = datetime.utcnow() - row
+        return delta.total_seconds() / 3600
+
+
 async def obtener_modo(telefono: str) -> str:
     async with get_session()() as session:
         result = await session.execute(

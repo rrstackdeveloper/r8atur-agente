@@ -18,6 +18,7 @@ from agent.memory import (
     atomic_claim_conversation, marcar_notificacion_enviada, obtener_registro_completo,
     validar_token, validar_credenciales, crear_sesion, invalidar_sesion,
     crear_agente, cambiar_password, actualizar_nombre_perfil,
+    horas_desde_ultimo_mensaje_cliente,
 )
 from agent.providers import obtener_proveedor
 from agent.providers.base import ProveedorWhatsApp
@@ -1002,6 +1003,17 @@ async def admin_enviar_media(
     from agent.providers.meta import ProveedorMeta
     if not isinstance(proveedor, ProveedorMeta):
         raise HTTPException(status_code=400, detail="Envío de media solo disponible con Meta Cloud API")
+
+    # Verificar ventana de 24h de Meta antes de subir el archivo
+    horas = await horas_desde_ultimo_mensaje_cliente(telefono)
+    if horas is None or horas > 24:
+        horas_txt = f"{horas:.0f}h" if horas is not None else "nunca"
+        raise HTTPException(
+            status_code=422,
+            detail=f"No se puede enviar: el cliente no ha escrito en las últimas 24 horas ({horas_txt}). "
+                   f"WhatsApp bloquea mensajes fuera de esa ventana. "
+                   f"Espera a que el cliente escriba primero.",
+        )
 
     mime_type = file.content_type or "application/octet-stream"
     filename = file.filename or "archivo"
