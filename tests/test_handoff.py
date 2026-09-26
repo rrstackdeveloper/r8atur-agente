@@ -392,14 +392,24 @@ async def test_19_audio_mismo_flujo():
 # ─── Escenario 20: Claim después de RESOLVED no puede reclamarse ─────────────
 
 @pytest.mark.asyncio
-async def test_20_claim_despues_de_resolved_falla():
-    """Una conversación en estado RESOLVED no puede ser reclamada con atomic_claim."""
-    from agent.memory import establecer_handoff, atomic_claim_conversation
+async def test_20_claim_despues_de_resolved_si_funciona():
+    """
+    Una conversación RESOLVED SÍ puede reclamarse: si el cliente vuelve a
+    escribir después de cerrarse su caso, un agente debe poder retomarla.
+    Solo HUMAN_ACTIVE (otro agente dentro) bloquea el claim.
+    """
+    from agent.memory import establecer_handoff, atomic_claim_conversation, obtener_registro_completo
 
-    # Estado RESOLVED
     await establecer_handoff(TELEFONO, modo="bot", handoff_status="RESOLVED")
 
-    # Intentar reclamar — debe fallar porque RESOLVED no está en la lista de estados permitidos
     resultado = await atomic_claim_conversation(TELEFONO, "Alejandro")
-    assert resultado["success"] is False, "No debe poder reclamarse una conversación RESOLVED"
-    assert resultado["reason"] == "ya_tomada"
+    assert resultado["success"] is True, "Una conversación RESOLVED debe poder retomarse"
+
+    registro = await obtener_registro_completo(TELEFONO)
+    assert registro.handoff_status == "HUMAN_ACTIVE"
+    assert registro.assigned_agent == "Alejandro"
+
+    # Y ahora que está HUMAN_ACTIVE, un segundo agente ya no puede tomarla
+    segundo = await atomic_claim_conversation(TELEFONO, "Yanara")
+    assert segundo["success"] is False
+    assert segundo["reason"] == "ya_tomada"

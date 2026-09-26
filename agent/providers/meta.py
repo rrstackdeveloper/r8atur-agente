@@ -1,12 +1,32 @@
 # agent/providers/meta.py — Adaptador para Meta WhatsApp Cloud API
 
 import os
+import hmac
+import hashlib
 import logging
 import httpx
 from fastapi import Request
 from agent.providers.base import ProveedorWhatsApp, MensajeEntrante
 
 logger = logging.getLogger("agentkit")
+
+
+def verificar_firma(body: bytes, firma_header: str | None, app_secret: str) -> bool:
+    """
+    Verifica la cabecera X-Hub-Signature-256 que Meta envía en cada webhook.
+    Sin esto, cualquiera que conozca la URL puede inyectar mensajes falsos y
+    hacer que el agente envíe WhatsApps desde el número oficial de R8A.
+
+    Retorna True solo si la firma corresponde al cuerpo con el app secret.
+    """
+    if not firma_header or not app_secret:
+        return False
+    if not firma_header.startswith("sha256="):
+        return False
+    esperada = hmac.new(app_secret.encode("utf-8"), body, hashlib.sha256).hexdigest()
+    recibida = firma_header[len("sha256="):]
+    # compare_digest evita filtrar información por tiempo de comparación
+    return hmac.compare_digest(esperada, recibida)
 
 
 class ProveedorMeta(ProveedorWhatsApp):

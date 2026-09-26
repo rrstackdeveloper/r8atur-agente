@@ -18,7 +18,7 @@ from agent.memory import (
     atomic_claim_conversation, marcar_notificacion_enviada, obtener_registro_completo,
     validar_token, validar_credenciales, crear_sesion, invalidar_sesion,
     crear_agente, cambiar_password, actualizar_nombre_perfil,
-    horas_desde_ultimo_mensaje_cliente,
+    horas_desde_ultimo_mensaje_cliente, registrar_mensaje_procesado,
 )
 from agent.providers import obtener_proveedor
 from agent.providers.base import ProveedorWhatsApp
@@ -38,9 +38,31 @@ _RL_WINDOW: int = int(os.getenv("RATE_LIMIT_WINDOW", "60"))  # ventana en segund
 _rl_store: dict[str, deque] = {}
 
 
+_RL_ULTIMA_PURGA: float = 0.0
+_RL_PURGA_CADA: int = 300  # segundos entre purgas
+
+
+def _purgar_rate_limit(now: float) -> None:
+    """
+    Elimina teléfonos sin actividad en la ventana. Sin esto, _rl_store crece
+    indefinidamente (una entrada por cada número que escribe alguna vez).
+    """
+    global _RL_ULTIMA_PURGA
+    if now - _RL_ULTIMA_PURGA < _RL_PURGA_CADA:
+        return
+    _RL_ULTIMA_PURGA = now
+    limite = now - _RL_WINDOW
+    vacios = [tel for tel, q in _rl_store.items() if not q or q[-1] < limite]
+    for tel in vacios:
+        del _rl_store[tel]
+    if vacios:
+        logger.debug(f"Rate limiter purgado: {len(vacios)} teléfonos inactivos")
+
+
 def _rate_limit_ok(telefono: str) -> bool:
     """Desliza ventana de tiempo y retorna False si el teléfono excede el límite."""
     now = time.monotonic()
+    _purgar_rate_limit(now)
     if telefono not in _rl_store:
         _rl_store[telefono] = deque()
     q = _rl_store[telefono]
@@ -217,23 +239,44 @@ async def webhook_verificacion(request: Request):
 async def webhook_handler(request: Request):
     if proveedor is None:
         raise HTTPException(status_code=503, detail="Servidor iniciando")
+
+    # ── Verificación de firma (Meta firma cada webhook con el App Secret) ──
+    # Sin esto, cualquiera que conozca la URL puede inyectar mensajes falsos y
+    # hacer que el agente envíe WhatsApps desde el número oficial de R8A.
+    app_secret = os.getenv("META_APP_SECRET", "")
+    if app_secret:
+        from agent.providers.meta import verificar_firma
+        cuerpo = await request.body()
+        firma = request.headers.get("x-hub-signature-256")
+        if not verificar_firma(cuerpo, firma, app_secret):
+            logger.warning("Webhook con firma inválida — rechazado")
+            raise HTTPException(status_code=403, detail="Firma inválida")
+    else:
+        logger.warning(
+            "META_APP_SECRET no configurado — el webhook acepta peticiones sin verificar firma. "
+            "Configúralo en Railway para cerrar este riesgo."
+        )
+
     try:
         mensajes = await proveedor.parsear_webhook(request)
+    except Exception as e:
+        # Un 500 hace que Meta reenvíe el batch completo y Naylan responda
+        # dos veces a los mensajes que sí se procesaron. Respondemos 200.
+        logger.error(f"Error parseando webhook: {e}")
+        return {"status": "error", "detail": "parseo"}
 
-        for msg in mensajes:
+    for msg in mensajes:
+        try:
             if msg.es_propio or not msg.texto:
                 continue
 
-            if not _rate_limit_ok(msg.telefono):
-                logger.warning(
-                    f"Rate limit excedido para {msg.telefono} "
-                    f"(>{_RL_MAX} msgs en {_RL_WINDOW}s) — mensaje ignorado"
-                )
+            # ── Deduplicación: Meta entrega "al menos una vez" ──
+            if not await registrar_mensaje_procesado(msg.mensaje_id):
+                logger.info(f"Mensaje {msg.mensaje_id} ya procesado — ignorado (reintento de Meta)")
                 continue
 
             logger.info(f"Mensaje de {msg.telefono}: {msg.texto}")
 
-            # Actualizar nombre de perfil si viene en el payload
             if msg.nombre_perfil:
                 await actualizar_nombre_perfil(msg.telefono, msg.nombre_perfil)
 
@@ -244,6 +287,16 @@ async def webhook_handler(request: Request):
                 logger.info(f"Conversación {msg.telefono} en HUMAN_ACTIVE — Naylan silenciada")
                 continue
 
+            # Rate limit: no respondemos, pero SÍ guardamos el mensaje para que
+            # quede visible en el dashboard. Descartarlo lo perdía en silencio.
+            if not _rate_limit_ok(msg.telefono):
+                await guardar_mensaje(msg.telefono, "user", msg.texto)
+                logger.warning(
+                    f"Rate limit excedido para {msg.telefono} "
+                    f"(>{_RL_MAX} msgs en {_RL_WINDOW}s) — guardado sin respuesta automática"
+                )
+                continue
+
             historial = await obtener_historial(msg.telefono)
             respuesta_raw = await generar_respuesta(msg.texto, historial)
 
@@ -251,7 +304,7 @@ async def webhook_handler(request: Request):
             respuesta, escalado = extraer_escalado(respuesta_raw)
 
             await guardar_mensaje(msg.telefono, "user", msg.texto)
-            await guardar_mensaje(msg.telefono, "assistant", respuesta)
+            await guardar_mensaje(msg.telefono, "assistant", respuesta, autor="bot")
             await proveedor.enviar_mensaje(msg.telefono, respuesta)
 
             if escalado is not None:
@@ -278,11 +331,13 @@ async def webhook_handler(request: Request):
 
             logger.info(f"Respuesta a {msg.telefono}: {respuesta[:100]}...")
 
-        return {"status": "ok"}
+        except Exception as e:
+            # Un mensaje que falla no debe abortar los demás ni provocar un
+            # reintento del batch completo por parte de Meta.
+            logger.error(f"Error procesando mensaje de {msg.telefono}: {e}")
+            continue
 
-    except Exception as e:
-        logger.error(f"Error en webhook: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+    return {"status": "ok"}
 
 
 # ─── Admin Dashboard ──────────────────────────────────────────────────────────
@@ -347,6 +402,19 @@ async def admin_reset_password(
     body: ResetPasswordPayload,
     agente: dict = Depends(_get_agente),
 ):
+    # Solo el propio agente, un admin o el CEO pueden cambiar una password.
+    # Sin esto, cualquier agente autenticado podía secuestrar la cuenta de otro.
+    es_uno_mismo = agente["id"] == agente_id
+    es_admin = agente.get("tipo") == "admin" or agente.get("rol") in ("admin", "ceo")
+    if not (es_uno_mismo or es_admin):
+        logger.warning(
+            f"Agente '{agente['id']}' intentó cambiar la password de '{agente_id}' — denegado"
+        )
+        raise HTTPException(
+            status_code=403,
+            detail="Solo puedes cambiar tu propia contraseña",
+        )
+
     ok = await cambiar_password(agente_id, body.password)
     if not ok:
         raise HTTPException(status_code=404, detail="Agente no encontrado")
@@ -779,10 +847,19 @@ async function sendMsg(){
   } else {
     if(!txt){sendBtn.disabled=false;return;}
     inp.value='';inp.style.height='auto';
-    await fetch('/admin/api/conversaciones/'+encodeURIComponent(phone)+'/mensaje',{
+    const rm=await fetch('/admin/api/conversaciones/'+encodeURIComponent(phone)+'/mensaje',{
       method:'POST',headers:apiH(),body:JSON.stringify({texto:txt})
     });
     sendBtn.disabled=false;
+    if(!rm.ok){
+      const eData=await rm.json().catch(()=>({}));
+      // Devolver el texto al input para que el agente no pierda lo que escribio
+      inp.value=txt;
+      inp.style.height='auto';
+      alert('No se envio el mensaje: '+(eData.detail||('HTTP '+rm.status)));
+      inp.focus();
+      return;
+    }
     await loadChat();
   }
   inp.focus();
@@ -992,10 +1069,33 @@ async def admin_enviar(
 ):
     if proveedor is None:
         raise HTTPException(status_code=503, detail="Proveedor no inicializado")
+
+    # Verificar la ventana de 24h de Meta ANTES de intentar el envío, igual que
+    # hace el envío de archivos. Fuera de ella WhatsApp rechaza el mensaje.
+    horas = await horas_desde_ultimo_mensaje_cliente(telefono)
+    if horas is None or horas > 24:
+        horas_txt = f"{horas:.0f}h" if horas is not None else "nunca"
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"No se puede enviar: el cliente no ha escrito en las últimas 24 horas "
+                f"({horas_txt}). WhatsApp bloquea mensajes fuera de esa ventana. "
+                f"Espera a que el cliente escriba primero."
+            ),
+        )
+
     ok = await proveedor.enviar_mensaje(telefono, body.texto)
-    if ok:
-        await guardar_mensaje(telefono, "assistant", body.texto)
-    return {"ok": ok}
+    if not ok:
+        # Antes esto devolvía 200 con ok:false y el dashboard lo ignoraba: el
+        # agente creía haber escrito al cliente y el mensaje se perdía.
+        logger.error(f"Fallo enviando mensaje de '{agente['id']}' a {telefono}")
+        raise HTTPException(
+            status_code=502,
+            detail="WhatsApp no pudo entregar el mensaje. Revisa los logs e intenta de nuevo.",
+        )
+
+    await guardar_mensaje(telefono, "assistant", body.texto, autor="agente")
+    return {"ok": True}
 
 
 @app.post("/admin/api/conversaciones/{telefono}/media")
@@ -1044,7 +1144,7 @@ async def admin_enviar_media(
     desc = f"[{tipo.capitalize()} enviado: {filename}]"
     if caption:
         desc += f" — {caption}"
-    await guardar_mensaje(telefono, "assistant", desc)
+    await guardar_mensaje(telefono, "assistant", desc, autor="agente")
     logger.info(f"Media enviada OK a {telefono}: {filename}")
     return {"ok": True, "tipo": tipo, "filename": filename}
 
