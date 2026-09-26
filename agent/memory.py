@@ -1,15 +1,19 @@
 # agent/memory.py — Memoria de conversaciones con SQLite/PostgreSQL
 import os
+import logging
 import hashlib
 import secrets
 import uuid
 from datetime import datetime, timedelta
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
-from sqlalchemy import String, Text, DateTime, Boolean, select, Integer, func, text, update
+from sqlalchemy import String, Text, DateTime, Boolean, select, Integer, func, text, update, inspect
+from sqlalchemy.exc import IntegrityError
 from dotenv import load_dotenv
 
 load_dotenv()
+
+logger = logging.getLogger("agentkit")
 
 _engine = None
 _async_session = None
@@ -51,7 +55,22 @@ class Mensaje(Base):
     telefono: Mapped[str] = mapped_column(String(50), index=True)
     role: Mapped[str] = mapped_column(String(20))
     content: Mapped[str] = mapped_column(Text)
+    # autor: None/"bot" = Naylan, "agente" = escrito por un humano del equipo.
+    # Naylan necesita distinguirlos para no asumir como propio lo que dijo un agente.
+    autor: Mapped[str | None] = mapped_column(String(20), nullable=True)
     timestamp: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class MensajeProcesado(Base):
+    """
+    IDs de mensajes de WhatsApp ya procesados. Meta entrega los webhooks
+    "al menos una vez": sin esta tabla un reintento hace que Naylan
+    responda dos veces al mismo mensaje.
+    """
+    __tablename__ = "mensajes_procesados"
+
+    mensaje_id: Mapped[str] = mapped_column(String(200), primary_key=True)
+    procesado_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
 class Agente(Base):
@@ -64,6 +83,9 @@ class Agente(Base):
     rol: Mapped[str] = mapped_column(String(50), default="agente")
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    # Si tiene fecha, el agente cambió su password a mano y el seed por
+    # env vars NO debe sobreescribirla en el siguiente arranque.
+    password_changed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
 class AgenteSesion(Base):
@@ -99,25 +121,37 @@ async def inicializar_db():
     async with get_engine().begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
-    # Cada migración en su propia transacción — si falla (columna ya existe) no
-    # afecta a las demás ni revierte el CREATE TABLE anterior. Crítico en PostgreSQL.
-    # Tipos usados: TIMESTAMP (válido en PostgreSQL y SQLite), FALSE (válido en ambos).
-    for sql in [
-        "ALTER TABLE conversacion_modo ADD COLUMN IF NOT EXISTS handoff_status VARCHAR(30) DEFAULT 'BOT_ACTIVE'",
-        "ALTER TABLE conversacion_modo ADD COLUMN IF NOT EXISTS assigned_agent VARCHAR(100)",
-        "ALTER TABLE conversacion_modo ADD COLUMN IF NOT EXISTS handoff_summary TEXT",
-        "ALTER TABLE conversacion_modo ADD COLUMN IF NOT EXISTS handoff_priority VARCHAR(20) DEFAULT 'NORMAL'",
-        "ALTER TABLE conversacion_modo ADD COLUMN IF NOT EXISTS notification_sent BOOLEAN DEFAULT FALSE",
-        "ALTER TABLE conversacion_modo ADD COLUMN IF NOT EXISTS notification_sent_at TIMESTAMP",
-        "ALTER TABLE conversacion_modo ADD COLUMN IF NOT EXISTS claimed_at TIMESTAMP",
-        "ALTER TABLE conversacion_modo ADD COLUMN IF NOT EXISTS resolved_at TIMESTAMP",
-        "ALTER TABLE conversacion_modo ADD COLUMN IF NOT EXISTS nombre_perfil VARCHAR(200)",
-    ]:
+    # Migraciones de columnas. Se inspecciona el esquema real y solo se agregan
+    # las que faltan: "ADD COLUMN IF NOT EXISTS" es válido en PostgreSQL pero NO
+    # en SQLite, donde fallaría en silencio dejando la columna sin crear.
+    # Tipos usados: TIMESTAMP y BOOLEAN son válidos en ambos motores.
+    columnas = [
+        ("conversacion_modo", "handoff_status", "VARCHAR(30) DEFAULT 'BOT_ACTIVE'"),
+        ("conversacion_modo", "assigned_agent", "VARCHAR(100)"),
+        ("conversacion_modo", "handoff_summary", "TEXT"),
+        ("conversacion_modo", "handoff_priority", "VARCHAR(20) DEFAULT 'NORMAL'"),
+        ("conversacion_modo", "notification_sent", "BOOLEAN DEFAULT FALSE"),
+        ("conversacion_modo", "notification_sent_at", "TIMESTAMP"),
+        ("conversacion_modo", "claimed_at", "TIMESTAMP"),
+        ("conversacion_modo", "resolved_at", "TIMESTAMP"),
+        ("conversacion_modo", "nombre_perfil", "VARCHAR(200)"),
+        ("mensajes", "autor", "VARCHAR(20)"),
+        ("agentes", "password_changed_at", "TIMESTAMP"),
+    ]
+    for tabla, columna, tipo in columnas:
         try:
             async with get_engine().begin() as conn:
-                await conn.execute(text(sql))
-        except Exception:
-            pass
+                existentes = await conn.run_sync(
+                    lambda sync_conn: [
+                        c["name"] for c in inspect(sync_conn).get_columns(tabla)
+                    ]
+                )
+                if columna in existentes:
+                    continue
+                await conn.execute(text(f"ALTER TABLE {tabla} ADD COLUMN {columna} {tipo}"))
+                logger.info(f"Migración: columna {tabla}.{columna} agregada")
+        except Exception as e:
+            logger.warning(f"Migración {tabla}.{columna} omitida: {e}")
 
     # Normalización de teléfonos: unificar registros con y sin prefijo '+'
     # 1. En conversacion_modo (PK=telefono): eliminar duplicados sin '+' donde ya existe con '+'
@@ -156,15 +190,57 @@ async def actualizar_nombre_perfil(telefono: str, nombre: str | None):
         await session.commit()
 
 
-async def guardar_mensaje(telefono: str, role: str, content: str):
+async def guardar_mensaje(telefono: str, role: str, content: str, autor: str | None = None):
+    """
+    Guarda un mensaje. `autor="agente"` marca los que escribió un humano
+    del equipo desde el dashboard (ver obtener_historial).
+    """
     async with get_session()() as session:
         session.add(Mensaje(
             telefono=telefono,
             role=role,
             content=content,
+            autor=autor,
             timestamp=datetime.utcnow()
         ))
         await session.commit()
+
+
+# Prefijo que ve Naylan (no el cliente ni el dashboard) para los mensajes
+# que escribió un agente humano durante un handoff.
+MARCA_AGENTE = "[Mensaje enviado por un agente humano del equipo R8A]: "
+
+
+async def registrar_mensaje_procesado(mensaje_id: str) -> bool:
+    """
+    Registra un mensaje_id de WhatsApp como procesado.
+    Retorna True si es la primera vez (hay que procesarlo) y False si ya
+    estaba registrado (reintento de Meta — hay que ignorarlo).
+    """
+    if not mensaje_id:
+        return True  # sin ID no podemos deduplicar; procesamos
+    async with get_session()() as session:
+        try:
+            session.add(MensajeProcesado(mensaje_id=mensaje_id, procesado_at=datetime.utcnow()))
+            await session.commit()
+            return True
+        except IntegrityError:
+            await session.rollback()
+            return False
+
+
+async def limpiar_mensajes_procesados(dias: int = 7) -> int:
+    """Borra IDs de mensajes procesados con más de N días. Retorna cuántos borró."""
+    limite = datetime.utcnow() - timedelta(days=dias)
+    async with get_session()() as session:
+        result = await session.execute(
+            select(MensajeProcesado).where(MensajeProcesado.procesado_at < limite)
+        )
+        viejos = result.scalars().all()
+        for m in viejos:
+            await session.delete(m)
+        await session.commit()
+        return len(viejos)
 
 
 async def obtener_historial(telefono: str, limite: int = 20) -> list[dict]:
@@ -178,7 +254,13 @@ async def obtener_historial(telefono: str, limite: int = 20) -> list[dict]:
         result = await session.execute(query)
         mensajes = result.scalars().all()
         mensajes.reverse()
-        return [{"role": msg.role, "content": msg.content} for msg in mensajes]
+        return [
+            {
+                "role": msg.role,
+                "content": (MARCA_AGENTE + msg.content) if msg.autor == "agente" else msg.content,
+            }
+            for msg in mensajes
+        ]
 
 
 async def limpiar_historial(telefono: str):
@@ -423,7 +505,12 @@ async def obtener_historial_completo(telefono: str, limite: int = 50) -> list[di
         mensajes = result.scalars().all()
         mensajes.reverse()
         return [
-            {"role": msg.role, "content": msg.content, "timestamp": msg.timestamp.isoformat()}
+            {
+                "role": msg.role,
+                "content": msg.content,
+                "autor": msg.autor,
+                "timestamp": msg.timestamp.isoformat(),
+            }
             for msg in mensajes
         ]
 
@@ -447,13 +534,19 @@ def verify_password(password: str, hashed: str) -> bool:
 
 
 async def crear_agente(agente_id: str, nombre: str, password: str, rol: str = "agente") -> bool:
-    """Crea el agente si no existe, o actualiza su password si ya existe. Retorna True si fue creado."""
+    """
+    Crea el agente si no existe. Si ya existe, sincroniza su password desde la
+    env var SALVO que el agente la haya cambiado a mano (password_changed_at):
+    de lo contrario cada redeploy revertiría el cambio del agente.
+    Retorna True si fue creado.
+    """
     async with get_session()() as session:
         result = await session.execute(select(Agente).where(Agente.id == agente_id))
         existing = result.scalar_one_or_none()
         if existing:
-            existing.password_hash = hash_password(password)
             existing.nombre = nombre
+            if existing.password_changed_at is None:
+                existing.password_hash = hash_password(password)
             await session.commit()
             return False
         session.add(Agente(
@@ -543,5 +636,6 @@ async def cambiar_password(agente_id: str, nuevo_password: str) -> bool:
         if not agente:
             return False
         agente.password_hash = hash_password(nuevo_password)
+        agente.password_changed_at = datetime.utcnow()
         await session.commit()
         return True
