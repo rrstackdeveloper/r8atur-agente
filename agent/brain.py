@@ -4,6 +4,7 @@ import re
 import json
 import yaml
 import logging
+from datetime import datetime, timedelta, timezone
 from anthropic import AsyncAnthropic
 from dotenv import load_dotenv
 
@@ -26,6 +27,57 @@ def cargar_config_prompts() -> dict:
 def cargar_system_prompt() -> str:
     config = cargar_config_prompts()
     return config.get("system_prompt", "Eres Naylan, asistente de R8ATUR. Responde en español.")
+
+
+# R8A opera desde Salvador, Bahia (UTC-3). Brasil no usa horario de verano
+# desde 2019, asi que el offset fijo es correcto todo el año; si zoneinfo
+# esta disponible se usa igual por si las reglas cambian.
+_TZ_BRASIL = timezone(timedelta(hours=-3))
+try:
+    from zoneinfo import ZoneInfo
+    _TZ_BRASIL = ZoneInfo("America/Bahia")
+except Exception:  # pragma: no cover — falta tzdata en el contenedor
+    pass
+
+_DIAS = ["lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo"]
+_MESES = ["enero", "febrero", "marzo", "abril", "mayo", "junio", "julio",
+          "agosto", "septiembre", "octubre", "noviembre", "diciembre"]
+
+
+def contexto_temporal(ahora: datetime | None = None) -> str:
+    """
+    Bloque con la fecha actual que se agrega al system prompt en cada mensaje.
+
+    Sin esto Claude no sabe en qué fecha vive y resuelve las referencias
+    relativas ("en diciembre", "el mes que viene") con el año de su
+    entrenamiento: un cliente pidió vuelos para diciembre y Naylan cotizó
+    diciembre de 2025 estando ya en 2026.
+    """
+    ahora = ahora or datetime.now(_TZ_BRASIL)
+    dia = _DIAS[ahora.weekday()]
+    mes = _MESES[ahora.month - 1]
+    return f"""
+
+  ## Fecha actual — IMPORTANTE
+  Hoy es {dia} {ahora.day} de {mes} de {ahora.year} (hora de Brasil).
+  El año en curso es {ahora.year}. El mes en curso es {mes} de {ahora.year}.
+
+  Reglas para interpretar fechas:
+  - Si el cliente menciona un mes sin año, se refiere a la próxima vez que
+    ocurra ese mes contando desde hoy. Si el mes ya pasó este año, es del año
+    siguiente.
+  - NUNCA asumas un año anterior al actual ({ahora.year}) para un viaje futuro.
+    Un viaje no puede ser en el pasado.
+  - Escribe SIEMPRE el año explícito en los resúmenes de cotización.
+  - Si la fecha que entendiste queda a más de 10 meses, o la referencia del
+    cliente es ambigua, confirma el año con él antes de cerrar el resumen.
+  - "Fin de año" = diciembre de {ahora.year}. "Año que viene" = {ahora.year + 1}.
+"""
+
+
+def cargar_system_prompt_completo() -> str:
+    """System prompt del negocio + la fecha actual."""
+    return cargar_system_prompt() + contexto_temporal()
 
 
 def obtener_mensaje_error() -> str:
@@ -77,7 +129,7 @@ async def generar_respuesta(mensaje: str, historial: list[dict]) -> str:
     if not mensaje or len(mensaje.strip()) < 2:
         return obtener_mensaje_fallback()
 
-    system_prompt = cargar_system_prompt()
+    system_prompt = cargar_system_prompt_completo()
 
     mensajes = list(historial)
     mensajes.append({"role": "user", "content": mensaje})
