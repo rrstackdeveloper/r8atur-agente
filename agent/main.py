@@ -220,9 +220,33 @@ async def notificar_agentes(telefono: str, resumen: dict):
         await marcar_notificacion_enviada(telefono)
 
 
+def _version_actual() -> str:
+    """
+    Commit desplegado, para poder confirmar desde fuera qué versión está viva.
+    Railway lo expone en RAILWAY_GIT_COMMIT_SHA; en local se lee de .git/HEAD.
+    """
+    sha = os.getenv("RAILWAY_GIT_COMMIT_SHA", "").strip()
+    if sha:
+        return sha[:7]
+    try:
+        with open(".git/HEAD", "r", encoding="utf-8") as f:
+            head = f.read().strip()
+        if head.startswith("ref: "):
+            with open(f".git/{head[5:]}", "r", encoding="utf-8") as f:
+                return f.read().strip()[:7]
+        return head[:7]
+    except OSError:
+        return "desconocida"
+
+
 @app.get("/")
 async def health_check():
-    return {"status": "ok", "agente": "Naylan", "negocio": "R8ATUR"}
+    return {
+        "status": "ok",
+        "agente": "Naylan",
+        "negocio": "R8ATUR",
+        "version": _version_actual(),
+    }
 
 
 @app.get("/webhook")
